@@ -17,6 +17,7 @@ import { Field, Form, Formik } from 'formik';
 import { useIntl } from 'react-intl';
 import useSWR, { mutate } from 'swr';
 import * as yup from 'yup';
+import SecondaryImportSettings from './SecondaryImportSettings';
 
 const messages = defineMessages('components.Settings.SettingsUsers', {
   users: 'Users',
@@ -522,6 +523,13 @@ const SettingsUsers = () => {
           }}
         </Formik>
       </div>
+      {(secondaryJellyfin?.ip || secondaryPlex?.machineId) && (
+        <SecondaryImportSettings
+          key={secondaryServerName}
+          serverName={secondaryServerName}
+          signInEnabled={settings.currentSettings.secondaryLoginEnabled}
+        />
+      )}
     </>
   );
 };

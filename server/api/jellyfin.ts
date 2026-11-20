@@ -18,6 +18,7 @@ export interface JellyfinUserResponse {
   };
   Policy: {
     IsAdministrator: boolean;
+    IsDisabled?: boolean;
   };
   PrimaryImageTag?: string;
 }
@@ -361,9 +362,14 @@ class JellyfinAPI extends ExternalAPI {
     }
   }
 
-  public async getUsers(): Promise<JellyfinUserListResponse> {
+  public async getUsers(
+    restrictToConfiguredHost = false
+  ): Promise<JellyfinUserListResponse> {
     try {
-      const userReponse = await this.get<JellyfinUserResponse[]>(`/Users`);
+      const userReponse = await this.get<JellyfinUserResponse[]>(
+        '/Users',
+        restrictToConfiguredHost ? { maxRedirects: 0 } : undefined
+      );
 
       return { users: userReponse };
     } catch (e) {

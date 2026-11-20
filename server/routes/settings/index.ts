@@ -22,6 +22,14 @@ import ImageProxy from '@server/lib/imageproxy';
 import { Permission } from '@server/lib/permissions';
 import { jellyfinFullScanner } from '@server/lib/scanners/jellyfin';
 import { plexFullScanner } from '@server/lib/scanners/plex';
+import {
+  getSecondaryJellyfinUsers,
+  getSecondaryPlexUsers,
+  isSecondaryProvider,
+  listSecondaryJellyfinUsers,
+  listSecondaryPlexUsers,
+  secondaryImportConfigured,
+} from '@server/lib/secondaryUserImport';
 import type { JobId, Library, MainSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -39,7 +47,7 @@ import { escapeRegExp, merge, omit, set, sortBy } from 'lodash';
 import { rescheduleJob } from 'node-schedule';
 import path from 'path';
 import semver from 'semver';
-import { IsNull, Not } from 'typeorm';
+import { In, IsNull, Not } from 'typeorm';
 import { URL } from 'url';
 import { z } from 'zod';
 import metadataRoutes from './metadata';
@@ -48,6 +56,124 @@ import radarrRoutes from './radarr';
 import sonarrRoutes from './sonarr';
 
 const settingsRoutes = Router();
+export const userDirectorySettingsRoutes = Router();
+
+const canManageUsers = isAuthenticated(Permission.MANAGE_USERS);
+
+userDirectorySettingsRoutes.get('/plex/import', canManageUsers, (_req, res) =>
+  res.json({ configured: secondaryImportConfigured('plex') })
+);
+
+userDirectorySettingsRoutes.get(
+  '/jellyfin/import',
+  canManageUsers,
+  (_req, res) => res.json({ configured: secondaryImportConfigured('jellyfin') })
+);
+
+const directoryCredential = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1024)
+  .regex(/^[a-zA-Z0-9._~-]+$/)
+  .nullable();
+
+settingsRoutes.post('/plex/import', async (req, res, next) => {
+  const settings = getSettings();
+  const machineId = settings.plex.machineId;
+  if (
+    !settings.public.initialized ||
+    !isSecondaryProvider('plex') ||
+    !machineId
+  ) {
+    return next({
+      status: 400,
+      message: 'Configure the secondary Plex server first.',
+    });
+  }
+
+  const result = z.object({ token: directoryCredential }).safeParse(req.body);
+  if (!result.success) {
+    return next({ status: 400, message: 'Enter a valid Plex token.' });
+  }
+
+  const { token } = result.data;
+  if (token === null) {
+    delete settings.secondaryImport.plex;
+  } else {
+    try {
+      await getSecondaryPlexUsers(token, machineId);
+    } catch {
+      return next({
+        status: 400,
+        message:
+          'The Plex token could not list users for the configured Plex server.',
+      });
+    }
+    if (!isSecondaryProvider('plex') || settings.plex.machineId !== machineId) {
+      return next({
+        status: 409,
+        message: 'The configured Plex server changed. Retry with its token.',
+      });
+    }
+    settings.secondaryImport.plex = { machineId, token };
+  }
+
+  await settings.save();
+  return res.json({ configured: secondaryImportConfigured('plex') });
+});
+
+settingsRoutes.post('/jellyfin/import', async (req, res, next) => {
+  const settings = getSettings();
+  const { serverId, ip } = settings.jellyfin;
+  if (
+    !settings.public.initialized ||
+    !isSecondaryProvider('jellyfin') ||
+    !ip ||
+    !serverId
+  ) {
+    return next({
+      status: 400,
+      message: 'Configure the secondary Jellyfin server first.',
+    });
+  }
+
+  const result = z.object({ apiKey: directoryCredential }).safeParse(req.body);
+  if (!result.success) {
+    return next({ status: 400, message: 'Enter a valid Jellyfin API key.' });
+  }
+
+  const { apiKey } = result.data;
+  if (apiKey === null) {
+    delete settings.secondaryImport.jellyfin;
+  } else {
+    const hostname = getHostname();
+    try {
+      await getSecondaryJellyfinUsers(apiKey, serverId, hostname);
+    } catch {
+      return next({
+        status: 400,
+        message:
+          'The API key could not list users for the configured Jellyfin server.',
+      });
+    }
+    if (
+      !isSecondaryProvider('jellyfin') ||
+      settings.jellyfin.serverId !== serverId ||
+      getHostname() !== hostname
+    ) {
+      return next({
+        status: 409,
+        message:
+          'The configured Jellyfin server changed. Retry with its API key.',
+      });
+    }
+    settings.secondaryImport.jellyfin = { serverId, hostname, apiKey };
+  }
+
+  await settings.save();
+  return res.json({ configured: secondaryImportConfigured('jellyfin') });
+});
 
 settingsRoutes.use('/notifications', notificationRoutes);
 settingsRoutes.use('/radarr', radarrRoutes);
@@ -596,32 +722,65 @@ settingsRoutes.post('/jellyfin/library/sync', async (_req, res, next) => {
   return res.status(200).json(settings.jellyfin.libraries);
 });
 
-settingsRoutes.get('/jellyfin/users', async (req, res) => {
-  const settings = getSettings();
+userDirectorySettingsRoutes.get(
+  '/jellyfin/users',
+  canManageUsers,
+  async (_req, res, next) => {
+    const settings = getSettings();
+    const userRepository = getRepository(User);
 
-  const userRepository = getRepository(User);
-  const admin = await userRepository.findOneOrFail({
-    select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
-    where: { id: 1 },
-    order: { id: 'ASC' },
-  });
-  const jellyfinClient = new JellyfinAPI(
-    getHostname(),
-    settings.jellyfin.apiKey,
-    admin.jellyfinDeviceId ?? ''
-  );
+    if (isSecondaryProvider('jellyfin')) {
+      try {
+        const users = await listSecondaryJellyfinUsers();
+        if (!users.length) return res.json([]);
 
-  jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
-  const resp = await jellyfinClient.getUsers();
-  const users = resp.users.map((user) => ({
-    username: user.Name,
-    id: user.Id,
-    thumb: `/avatarproxy/${user.Id}`,
-    email: user.Name,
-  }));
+        const existing = await userRepository.findBy([
+          { jellyfinUserId: In(users.map((user) => user.id)) },
+          { email: In(users.map((user) => user.email.toLowerCase())) },
+        ]);
+        return res.json(
+          sortBy(
+            users.filter(
+              (user) =>
+                !existing.some(
+                  (record) =>
+                    record.jellyfinUserId === user.id ||
+                    record.email === user.email.toLowerCase()
+                )
+            ),
+            'username'
+          )
+        );
+      } catch {
+        return next({
+          status: 502,
+          message: 'Unable to retrieve unimported Jellyfin users.',
+        });
+      }
+    }
+    const admin = await userRepository.findOneOrFail({
+      select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
+      where: { id: 1 },
+      order: { id: 'ASC' },
+    });
+    const jellyfinClient = new JellyfinAPI(
+      getHostname(),
+      settings.jellyfin.apiKey,
+      admin.jellyfinDeviceId ?? ''
+    );
 
-  return res.status(200).json(users);
-});
+    jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
+    const resp = await jellyfinClient.getUsers();
+    const users = resp.users.map((user) => ({
+      username: user.Name,
+      id: user.Id,
+      thumb: `/avatarproxy/${user.Id}`,
+      email: user.Name,
+    }));
+
+    return res.status(200).json(users);
+  }
+);
 
 settingsRoutes.get('/jellyfin/sync', (_req, res) => {
   return res.status(200).json(jellyfinFullScanner.status());
@@ -672,12 +831,42 @@ settingsRoutes.post('/tautulli', async (req, res, next) => {
   return res.status(200).json(settings.tautulli);
 });
 
-settingsRoutes.get(
+userDirectorySettingsRoutes.get(
   '/plex/users',
-  isAuthenticated(Permission.MANAGE_USERS),
-  async (req, res, next) => {
+  canManageUsers,
+  async (_req, res, next) => {
     const userRepository = getRepository(User);
     const qb = userRepository.createQueryBuilder('user');
+
+    if (isSecondaryProvider('plex')) {
+      try {
+        const users = await listSecondaryPlexUsers();
+        if (!users.length) return res.json([]);
+
+        const existing = await userRepository.findBy([
+          { plexId: In(users.map((user) => Number(user.id))) },
+          { email: In(users.map((user) => user.email.toLowerCase())) },
+        ]);
+        return res.json(
+          sortBy(
+            users.filter(
+              (user) =>
+                !existing.some(
+                  (record) =>
+                    record.plexId === Number(user.id) ||
+                    record.email === user.email.toLowerCase()
+                )
+            ),
+            'username'
+          )
+        );
+      } catch {
+        return next({
+          status: 502,
+          message: 'Unable to retrieve unimported Plex users.',
+        });
+      }
+    }
 
     try {
       const admin = await userRepository.findOneOrFail({

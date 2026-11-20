@@ -17,7 +17,9 @@ import { mapProductionCompany } from '@server/models/Movie';
 import { mapNetwork } from '@server/models/Tv';
 import { mapWatchProviderDetails } from '@server/models/common';
 import overrideRuleRoutes from '@server/routes/overrideRule';
-import settingsRoutes from '@server/routes/settings';
+import settingsRoutes, {
+  userDirectorySettingsRoutes,
+} from '@server/routes/settings';
 import watchlistRoutes from '@server/routes/watchlist';
 import {
   appDataPath,
@@ -153,6 +155,7 @@ router.get(
     }
   }
 );
+router.use('/settings', userDirectorySettingsRoutes);
 router.use('/settings', isAuthenticated(Permission.ADMIN), settingsRoutes);
 router.use('/search', isAuthenticated(), searchRoutes);
 router.use('/discover', isAuthenticated(), discoverRoutes);

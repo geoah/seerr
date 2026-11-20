@@ -376,6 +376,11 @@ export type JobId =
   | 'availability-sync'
   | 'process-blocklisted-tags';
 
+export interface SecondaryImportSettings {
+  plex?: { machineId: string; token: string };
+  jellyfin?: { serverId: string; hostname: string; apiKey: string };
+}
+
 export interface AllSettings {
   clientId: string;
   sessionSecret?: string;
@@ -392,6 +397,7 @@ export interface AllSettings {
   jobs: Record<JobId, JobSettings>;
   network: NetworkSettings;
   metadataSettings: MetadataSettings;
+  secondaryImport?: SecondaryImportSettings;
   migrations: string[];
 }
 
@@ -640,6 +646,7 @@ class Settings {
         apiRequestTimeout: 10000,
       },
       migrations: [],
+      secondaryImport: {},
     };
     if (initialSettings) {
       this.data = mergeSettings(this.data, initialSettings);
@@ -711,6 +718,10 @@ class Settings {
 
   set public(data: PublicSettings) {
     this.data.public = mergeSettings(this.data.public, data);
+  }
+
+  get secondaryImport(): SecondaryImportSettings {
+    return (this.data.secondaryImport ??= {});
   }
 
   get secondaryLoginConfigured(): boolean {
