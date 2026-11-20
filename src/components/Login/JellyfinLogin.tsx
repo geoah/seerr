@@ -1,19 +1,17 @@
 import Button from '@app/components/Common/Button';
 import SensitiveInput from '@app/components/Common/SensitiveInput';
-import JellyfinQuickConnectModal from '@app/components/Login/JellyfinQuickConnectModal';
+import { useQuickConnect } from '@app/hooks/useQuickConnect';
 import useSettings from '@app/hooks/useSettings';
 import useToasts from '@app/hooks/useToasts';
+import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
-import {
-  ArrowLeftOnRectangleIcon,
-  QrCodeIcon,
-} from '@heroicons/react/24/outline';
+import { ArrowLeftOnRectangleIcon } from '@heroicons/react/24/outline';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/solid';
 import { ApiErrorCode } from '@server/constants/error';
 import { MediaServerType, ServerType } from '@server/constants/server';
 import axios from 'axios';
 import { Field, Form, Formik } from 'formik';
-import { useCallback, useState } from 'react';
+import { useRef } from 'react';
 import { useIntl } from 'react-intl';
 import * as Yup from 'yup';
 
@@ -33,7 +31,10 @@ const messages = defineMessages('components.Login', {
   signin: 'Sign In',
   forgotpassword: 'Forgot Password?',
   quickconnect: 'Quick Connect',
-  quickconnecterror: 'Quick Connect failed. Please try again.',
+  authorizeCode:
+    'In your Jellyfin app, go to Settings → Quick Connect and enter this code.',
+  codeExpired: 'This code has expired.',
+  orUsePassword: 'Or sign in with your password',
 });
 
 interface JellyfinLoginProps {
@@ -50,9 +51,21 @@ const JellyfinLogin = ({
   const toasts = useToasts();
   const intl = useIntl();
   const settings = useSettings();
-  const [showQuickConnect, setShowQuickConnect] = useState(
-    serverType === MediaServerType.JELLYFIN
-  );
+  const isJellyfin = serverType === MediaServerType.JELLYFIN;
+  const pendingLogin = useRef<ReturnType<typeof axios.post> | null>(null);
+  // A code approval can arrive while the password form is being submitted.
+  const signIn = async (path: string, credentials: Record<string, string>) => {
+    pendingLogin.current ??= axios.post(path, credentials).finally(() => {
+      pendingLogin.current = null;
+    });
+    await pendingLogin.current;
+  };
+  const quickConnect = useQuickConnect({
+    show: isJellyfin,
+    onSuccess: revalidate,
+    authenticate: (secret) =>
+      signIn('/api/v1/auth/jellyfin/quickconnect/authenticate', { secret }),
+  });
 
   const mediaServerFormatValues = {
     mediaServerName:
@@ -62,16 +75,6 @@ const JellyfinLogin = ({
           ? ServerType.EMBY
           : 'Media Server',
   };
-
-  const handleQuickConnectError = useCallback(
-    (error: string) => {
-      toasts.addToast(error, {
-        autoDismiss: true,
-        appearance: 'error',
-      });
-    },
-    [toasts]
-  );
 
   const LoginSchema = Yup.object().shape({
     username: Yup.string().required(
@@ -85,22 +88,63 @@ const JellyfinLogin = ({
   const jellyfinForgotPasswordUrl =
     settings.currentSettings.jellyfinForgotPasswordUrl;
 
-  if (showQuickConnect) {
-    return (
-      <JellyfinQuickConnectModal
-        onClose={() => setShowQuickConnect(false)}
-        onAuthenticated={() => {
-          setShowQuickConnect(false);
-          revalidate();
-        }}
-        onError={handleQuickConnectError}
-        mediaServerName={mediaServerFormatValues.mediaServerName}
-      />
-    );
-  }
-
   return (
     <div>
+      <h2 className="-mt-1 mb-6 text-center text-lg font-bold text-neutral-200">
+        {intl.formatMessage(messages.loginwithapp, {
+          appName: mediaServerFormatValues.mediaServerName,
+        })}
+      </h2>
+      {isJellyfin && (
+        <>
+          <section
+            aria-labelledby="quick-connect-title"
+            className="text-center"
+          >
+            <h3
+              id="quick-connect-title"
+              className="text-sm font-semibold text-gray-200"
+            >
+              {intl.formatMessage(messages.quickconnect)}
+            </h3>
+            <div role="status" className="my-2">
+              {quickConnect.hasError || quickConnect.isExpired ? (
+                <p className="text-sm text-gray-300">
+                  {quickConnect.errorMessage ||
+                    intl.formatMessage(messages.codeExpired)}
+                </p>
+              ) : quickConnect.isLoading ? (
+                <p className="text-sm text-gray-300">
+                  {intl.formatMessage(globalMessages.loading)}
+                </p>
+              ) : (
+                <>
+                  <p className="font-mono text-3xl font-semibold tracking-widest text-white">
+                    {quickConnect.code}
+                  </p>
+                  <p className="mt-2 text-sm text-gray-300">
+                    {intl.formatMessage(messages.authorizeCode)}
+                  </p>
+                </>
+              )}
+            </div>
+            {(quickConnect.hasError || quickConnect.isExpired) && (
+              <Button
+                type="button"
+                buttonType="ghost"
+                onClick={quickConnect.initiateQuickConnect}
+              >
+                {intl.formatMessage(globalMessages.retry)}
+              </Button>
+            )}
+          </section>
+          <div className="my-5 flex items-center gap-3 text-center text-sm text-gray-300">
+            <span className="flex-1 border-t border-gray-600" />
+            {intl.formatMessage(messages.orUsePassword)}
+            <span className="flex-1 border-t border-gray-600" />
+          </div>
+        </>
+      )}
       <Formik
         initialValues={{
           username: '',
@@ -110,7 +154,7 @@ const JellyfinLogin = ({
         validateOnBlur={false}
         onSubmit={async (values) => {
           try {
-            await axios.post('/api/v1/auth/jellyfin', {
+            await signIn('/api/v1/auth/jellyfin', {
               username: values.username,
               password: values.password,
               email: values.username,
@@ -149,12 +193,6 @@ const JellyfinLogin = ({
             <>
               <Form data-form-type="login">
                 <div>
-                  <h2 className="-mt-1 mb-6 text-center text-lg font-bold text-neutral-200">
-                    {intl.formatMessage(messages.loginwithapp, {
-                      appName: mediaServerFormatValues.mediaServerName,
-                    })}
-                  </h2>
-
                   <div className="mb-4 mt-1">
                     <div className="form-input-field">
                       <Field
@@ -238,20 +276,6 @@ const JellyfinLogin = ({
           );
         }}
       </Formik>
-
-      {serverType === MediaServerType.JELLYFIN && (
-        <div className="mt-4">
-          <Button
-            buttonType="ghost"
-            type="button"
-            onClick={() => setShowQuickConnect(true)}
-            className="w-full"
-          >
-            <QrCodeIcon />
-            <span>{intl.formatMessage(messages.quickconnect)}</span>
-          </Button>
-        </div>
-      )}
     </div>
   );
 };
