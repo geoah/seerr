@@ -4,6 +4,7 @@ import PlexAPI from '@server/api/plexapi';
 import PlexTvAPI from '@server/api/plextv';
 import TautulliAPI from '@server/api/tautulli';
 import { ApiErrorCode } from '@server/constants/error';
+import { MediaServerType } from '@server/constants/server';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
@@ -21,6 +22,14 @@ import ImageProxy from '@server/lib/imageproxy';
 import { Permission } from '@server/lib/permissions';
 import { jellyfinFullScanner } from '@server/lib/scanners/jellyfin';
 import { plexFullScanner } from '@server/lib/scanners/plex';
+import {
+  getSecondaryJellyfinUsers,
+  getSecondaryPlexUsers,
+  isSecondaryProvider,
+  listSecondaryJellyfinUsers,
+  listSecondaryPlexUsers,
+  secondaryImportConfigured,
+} from '@server/lib/secondaryUserImport';
 import type { JobId, Library, MainSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -38,6 +47,7 @@ import { escapeRegExp, merge, omit, set, sortBy } from 'lodash';
 import { rescheduleJob } from 'node-schedule';
 import path from 'path';
 import semver from 'semver';
+import { In, IsNull, Not } from 'typeorm';
 import { URL } from 'url';
 import { z } from 'zod';
 import metadataRoutes from './metadata';
@@ -46,6 +56,124 @@ import radarrRoutes from './radarr';
 import sonarrRoutes from './sonarr';
 
 const settingsRoutes = Router();
+export const userDirectorySettingsRoutes = Router();
+
+const canManageUsers = isAuthenticated(Permission.MANAGE_USERS);
+
+userDirectorySettingsRoutes.get('/plex/import', canManageUsers, (_req, res) =>
+  res.json({ configured: secondaryImportConfigured('plex') })
+);
+
+userDirectorySettingsRoutes.get(
+  '/jellyfin/import',
+  canManageUsers,
+  (_req, res) => res.json({ configured: secondaryImportConfigured('jellyfin') })
+);
+
+const directoryCredential = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1024)
+  .regex(/^[a-zA-Z0-9._~-]+$/)
+  .nullable();
+
+settingsRoutes.post('/plex/import', async (req, res, next) => {
+  const settings = getSettings();
+  const machineId = settings.plex.machineId;
+  if (
+    !settings.public.initialized ||
+    !isSecondaryProvider('plex') ||
+    !machineId
+  ) {
+    return next({
+      status: 400,
+      message: 'Configure the secondary Plex server first.',
+    });
+  }
+
+  const result = z.object({ token: directoryCredential }).safeParse(req.body);
+  if (!result.success) {
+    return next({ status: 400, message: 'Enter a valid Plex token.' });
+  }
+
+  const { token } = result.data;
+  if (token === null) {
+    delete settings.secondaryImport.plex;
+  } else {
+    try {
+      await getSecondaryPlexUsers(token, machineId);
+    } catch {
+      return next({
+        status: 400,
+        message:
+          'The Plex token could not list users for the configured Plex server.',
+      });
+    }
+    if (!isSecondaryProvider('plex') || settings.plex.machineId !== machineId) {
+      return next({
+        status: 409,
+        message: 'The configured Plex server changed. Retry with its token.',
+      });
+    }
+    settings.secondaryImport.plex = { machineId, token };
+  }
+
+  await settings.save();
+  return res.json({ configured: secondaryImportConfigured('plex') });
+});
+
+settingsRoutes.post('/jellyfin/import', async (req, res, next) => {
+  const settings = getSettings();
+  const { serverId, ip } = settings.jellyfin;
+  if (
+    !settings.public.initialized ||
+    !isSecondaryProvider('jellyfin') ||
+    !ip ||
+    !serverId
+  ) {
+    return next({
+      status: 400,
+      message: 'Configure the secondary Jellyfin server first.',
+    });
+  }
+
+  const result = z.object({ apiKey: directoryCredential }).safeParse(req.body);
+  if (!result.success) {
+    return next({ status: 400, message: 'Enter a valid Jellyfin API key.' });
+  }
+
+  const { apiKey } = result.data;
+  if (apiKey === null) {
+    delete settings.secondaryImport.jellyfin;
+  } else {
+    const hostname = getHostname();
+    try {
+      await getSecondaryJellyfinUsers(apiKey, serverId, hostname);
+    } catch {
+      return next({
+        status: 400,
+        message:
+          'The API key could not list users for the configured Jellyfin server.',
+      });
+    }
+    if (
+      !isSecondaryProvider('jellyfin') ||
+      settings.jellyfin.serverId !== serverId ||
+      getHostname() !== hostname
+    ) {
+      return next({
+        status: 409,
+        message:
+          'The configured Jellyfin server changed. Retry with its API key.',
+      });
+    }
+    settings.secondaryImport.jellyfin = { serverId, hostname, apiKey };
+  }
+
+  await settings.save();
+  return res.json({ configured: secondaryImportConfigured('jellyfin') });
+});
 
 settingsRoutes.use('/notifications', notificationRoutes);
 settingsRoutes.use('/radarr', radarrRoutes);
@@ -78,8 +206,18 @@ settingsRoutes.get('/main', (req, res, next) => {
   res.status(200).json(filteredMainSettings(req.user, settings.main));
 });
 
-settingsRoutes.post('/main', async (req, res) => {
+settingsRoutes.post('/main', async (req, res, next) => {
   const settings = getSettings();
+
+  if (
+    req.body.secondaryLoginEnabled === true &&
+    !(settings.public.initialized && settings.secondaryLoginConfigured)
+  ) {
+    return next({
+      status: 400,
+      message: 'Configure the secondary media server first.',
+    });
+  }
 
   settings.main = merge(settings.main, req.body);
   await settings.save();
@@ -123,6 +261,14 @@ settingsRoutes.get('/plex', (_req, res) => {
 settingsRoutes.post('/plex', async (req, res, next) => {
   const userRepository = getRepository(User);
   const settings = getSettings();
+
+  if (settings.main.mediaServerType === MediaServerType.JELLYFIN) {
+    return next({
+      status: 400,
+      message: 'Use the secondary login settings to configure Plex.',
+    });
+  }
+
   try {
     const admin = await userRepository.findOneOrFail({
       select: { id: true, plexToken: true },
@@ -155,6 +301,44 @@ settingsRoutes.post('/plex', async (req, res, next) => {
   }
 
   return res.status(200).json(settings.plex);
+});
+
+settingsRoutes.get('/plex/login', (_req, res) => {
+  const settings = getSettings();
+  return res.status(200).json({ machineId: settings.plex.machineId ?? '' });
+});
+
+settingsRoutes.post('/plex/login', async (req, res, next) => {
+  const settings = getSettings();
+  if (
+    !settings.public.initialized ||
+    settings.main.mediaServerType !== MediaServerType.JELLYFIN
+  ) {
+    return next({
+      status: 400,
+      message:
+        'Plex can be configured for secondary login on an initialized Jellyfin instance.',
+    });
+  }
+
+  const result = z
+    .object({
+      machineId: z
+        .string()
+        .trim()
+        .regex(/^[a-zA-Z0-9-]{1,128}$/),
+    })
+    .safeParse(req.body);
+  if (!result.success) {
+    return next({
+      status: 400,
+      message: 'A valid Plex server machine ID is required.',
+    });
+  }
+
+  settings.plex.machineId = result.data.machineId;
+  await settings.save();
+  return res.status(200).json({ machineId: settings.plex.machineId });
 });
 
 settingsRoutes.get('/plex/devices/servers', async (req, res, next) => {
@@ -308,6 +492,13 @@ settingsRoutes.post('/jellyfin', async (req, res, next) => {
   const userRepository = getRepository(User);
   const settings = getSettings();
 
+  if (settings.main.mediaServerType === MediaServerType.PLEX) {
+    return next({
+      status: 400,
+      message: 'Use the secondary login settings to configure Jellyfin.',
+    });
+  }
+
   try {
     const admin = await userRepository.findOneOrFail({
       where: { id: 1 },
@@ -359,6 +550,83 @@ settingsRoutes.post('/jellyfin', async (req, res, next) => {
   }
 
   return res.status(200).json(settings.jellyfin);
+});
+
+const jellyfinLoginSettings = z.object({
+  ip: z
+    .string()
+    .trim()
+    .min(1)
+    .regex(/^[a-zA-Z0-9.:[\]-]+$/),
+  port: z.number().int().min(1).max(65535),
+  useSsl: z.boolean().default(false),
+  urlBase: z
+    .string()
+    .regex(/^(?:\/(?!\/)[^?#\\]*)?$/)
+    .default(''),
+});
+
+settingsRoutes.get('/jellyfin/login', (_req, res) => {
+  const { ip, port, useSsl, urlBase } = getSettings().jellyfin;
+  return res.status(200).json({ ip, port, useSsl, urlBase });
+});
+
+settingsRoutes.post('/jellyfin/login', async (req, res, next) => {
+  const settings = getSettings();
+  const userRepository = getRepository(User);
+  if (
+    !settings.public.initialized ||
+    settings.main.mediaServerType !== MediaServerType.PLEX
+  ) {
+    return next({
+      status: 400,
+      message:
+        'Jellyfin can be configured for secondary login on an initialized Plex instance.',
+    });
+  }
+
+  const result = jellyfinLoginSettings.safeParse(req.body);
+  if (!result.success) {
+    return next({
+      status: 400,
+      message: 'Enter a valid Jellyfin server address.',
+    });
+  }
+
+  try {
+    const hostname = new URL(getHostname(result.data)).href;
+    const jellyfinClient = new JellyfinAPI(hostname);
+    const server = await jellyfinClient.getPublicSystemInfo();
+    if (server.ProductName !== 'Jellyfin Server' || !server.Id) {
+      return next({
+        status: 400,
+        message: 'The secondary server must be Jellyfin.',
+      });
+    }
+
+    if (
+      settings.jellyfin.serverId !== server.Id &&
+      (await userRepository.existsBy({ jellyfinUserId: Not(IsNull()) }))
+    ) {
+      return next({
+        status: 400,
+        message:
+          'The Jellyfin server cannot change while Seerr has accounts linked to it.',
+      });
+    }
+
+    settings.jellyfin = {
+      ...settings.jellyfin,
+      ...result.data,
+      name: server.ServerName,
+      serverId: server.Id,
+    };
+    await settings.save();
+
+    return res.status(200).json(result.data);
+  } catch {
+    return next({ status: 400, message: 'Unable to connect to Jellyfin.' });
+  }
 });
 
 settingsRoutes.get('/jellyfin/library', (_req, res) => {
@@ -454,32 +722,65 @@ settingsRoutes.post('/jellyfin/library/sync', async (_req, res, next) => {
   return res.status(200).json(settings.jellyfin.libraries);
 });
 
-settingsRoutes.get('/jellyfin/users', async (req, res) => {
-  const settings = getSettings();
+userDirectorySettingsRoutes.get(
+  '/jellyfin/users',
+  canManageUsers,
+  async (_req, res, next) => {
+    const settings = getSettings();
+    const userRepository = getRepository(User);
 
-  const userRepository = getRepository(User);
-  const admin = await userRepository.findOneOrFail({
-    select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
-    where: { id: 1 },
-    order: { id: 'ASC' },
-  });
-  const jellyfinClient = new JellyfinAPI(
-    getHostname(),
-    settings.jellyfin.apiKey,
-    admin.jellyfinDeviceId ?? ''
-  );
+    if (isSecondaryProvider('jellyfin')) {
+      try {
+        const users = await listSecondaryJellyfinUsers();
+        if (!users.length) return res.json([]);
 
-  jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
-  const resp = await jellyfinClient.getUsers();
-  const users = resp.users.map((user) => ({
-    username: user.Name,
-    id: user.Id,
-    thumb: `/avatarproxy/${user.Id}`,
-    email: user.Name,
-  }));
+        const existing = await userRepository.findBy([
+          { jellyfinUserId: In(users.map((user) => user.id)) },
+          { email: In(users.map((user) => user.email.toLowerCase())) },
+        ]);
+        return res.json(
+          sortBy(
+            users.filter(
+              (user) =>
+                !existing.some(
+                  (record) =>
+                    record.jellyfinUserId === user.id ||
+                    record.email === user.email.toLowerCase()
+                )
+            ),
+            'username'
+          )
+        );
+      } catch {
+        return next({
+          status: 502,
+          message: 'Unable to retrieve unimported Jellyfin users.',
+        });
+      }
+    }
+    const admin = await userRepository.findOneOrFail({
+      select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
+      where: { id: 1 },
+      order: { id: 'ASC' },
+    });
+    const jellyfinClient = new JellyfinAPI(
+      getHostname(),
+      settings.jellyfin.apiKey,
+      admin.jellyfinDeviceId ?? ''
+    );
 
-  return res.status(200).json(users);
-});
+    jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
+    const resp = await jellyfinClient.getUsers();
+    const users = resp.users.map((user) => ({
+      username: user.Name,
+      id: user.Id,
+      thumb: `/avatarproxy/${user.Id}`,
+      email: user.Name,
+    }));
+
+    return res.status(200).json(users);
+  }
+);
 
 settingsRoutes.get('/jellyfin/sync', (_req, res) => {
   return res.status(200).json(jellyfinFullScanner.status());
@@ -530,12 +831,42 @@ settingsRoutes.post('/tautulli', async (req, res, next) => {
   return res.status(200).json(settings.tautulli);
 });
 
-settingsRoutes.get(
+userDirectorySettingsRoutes.get(
   '/plex/users',
-  isAuthenticated(Permission.MANAGE_USERS),
-  async (req, res, next) => {
+  canManageUsers,
+  async (_req, res, next) => {
     const userRepository = getRepository(User);
     const qb = userRepository.createQueryBuilder('user');
+
+    if (isSecondaryProvider('plex')) {
+      try {
+        const users = await listSecondaryPlexUsers();
+        if (!users.length) return res.json([]);
+
+        const existing = await userRepository.findBy([
+          { plexId: In(users.map((user) => Number(user.id))) },
+          { email: In(users.map((user) => user.email.toLowerCase())) },
+        ]);
+        return res.json(
+          sortBy(
+            users.filter(
+              (user) =>
+                !existing.some(
+                  (record) =>
+                    record.plexId === Number(user.id) ||
+                    record.email === user.email.toLowerCase()
+                )
+            ),
+            'username'
+          )
+        );
+      } catch {
+        return next({
+          status: 502,
+          message: 'Unable to retrieve unimported Plex users.',
+        });
+      }
+    }
 
     try {
       const admin = await userRepository.findOneOrFail({

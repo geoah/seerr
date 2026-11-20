@@ -76,6 +76,7 @@ interface ServerResponse {
     id: string;
     serverId: string;
     machineIdentifier: string;
+    pending?: string;
     name: string;
     lastSeenAt: string;
     numLibraries: string;
@@ -92,6 +93,7 @@ interface UsersResponse {
         username: string;
         email: string;
         thumb: string;
+        pending?: string;
       };
       Server: ServerResponse[];
     }[];
@@ -213,6 +215,7 @@ class PlexTvAPI extends ExternalAPI {
       const devicesResp = await this.axios.get(
         '/api/resources?includeHttps=1',
         {
+          maxRedirects: 0,
           transformResponse: [],
           responseType: 'text',
         }
@@ -267,7 +270,8 @@ class PlexTvAPI extends ExternalAPI {
   public async getUser(): Promise<PlexUser> {
     try {
       const account = await this.axios.get<PlexAccountResponse>(
-        '/users/account.json'
+        '/users/account.json',
+        { maxRedirects: 0 }
       );
 
       return account.data.user;
@@ -311,6 +315,7 @@ class PlexTvAPI extends ExternalAPI {
 
   public async getUsers(): Promise<UsersResponse> {
     const response = await this.axios.get('/api/users', {
+      maxRedirects: 0,
       transformResponse: [],
       responseType: 'text',
     });

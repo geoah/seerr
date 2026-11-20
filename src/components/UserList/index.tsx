@@ -107,6 +107,14 @@ type Sort =
   | 'role';
 type SortDirection = 'asc' | 'desc';
 
+const mediaServerNames = {
+  [MediaServerType.PLEX]: ServerType.PLEX,
+  [MediaServerType.JELLYFIN]: ServerType.JELLYFIN,
+  [MediaServerType.EMBY]: ServerType.EMBY,
+};
+
+type ImportProvider = keyof typeof mediaServerNames;
+
 const UserList = () => {
   const intl = useIntl();
   const router = useRouter();
@@ -158,7 +166,37 @@ const UserList = () => {
   };
 
   const [isDeleting, setDeleting] = useState(false);
-  const [showImportModal, setShowImportModal] = useState(false);
+  const { mediaServerType, secondaryLoginEnabled } = settings.currentSettings;
+  const primaryImportType =
+    mediaServerType === MediaServerType.PLEX ||
+    mediaServerType === MediaServerType.EMBY
+      ? mediaServerType
+      : MediaServerType.JELLYFIN;
+  const secondaryImportType =
+    mediaServerType === MediaServerType.PLEX
+      ? MediaServerType.JELLYFIN
+      : MediaServerType.PLEX;
+  const { data: secondaryImport } = useSWR<{ configured: boolean }>(
+    secondaryLoginEnabled
+      ? `/api/v1/settings/${mediaServerNames[secondaryImportType].toLowerCase()}/import`
+      : null
+  );
+  const importTypes: ImportProvider[] = secondaryImport?.configured
+    ? [primaryImportType, secondaryImportType]
+    : [primaryImportType];
+  const [importModal, setImportModal] = useState<{
+    provider: ImportProvider;
+    isOpen: boolean;
+  }>({
+    provider: primaryImportType,
+    isOpen: false,
+  });
+  const closeImportModal = () =>
+    setImportModal((modal) => ({ ...modal, isOpen: false }));
+  const completeImport = () => {
+    closeImportModal();
+    revalidate();
+  };
   const [deleteModal, setDeleteModal] = useState<{
     isOpen: boolean;
     user?: User;
@@ -620,23 +658,17 @@ const UserList = () => {
         leave="transition-opacity duration-300"
         leaveFrom="opacity-100"
         leaveTo="opacity-0"
-        show={showImportModal}
+        show={importModal.isOpen}
       >
-        {settings.currentSettings.mediaServerType === MediaServerType.PLEX ? (
+        {importModal.provider === MediaServerType.PLEX ? (
           <PlexImportModal
-            onCancel={() => setShowImportModal(false)}
-            onComplete={() => {
-              setShowImportModal(false);
-              revalidate();
-            }}
+            onCancel={closeImportModal}
+            onComplete={completeImport}
           />
         ) : (
           <JellyfinImportModal
-            onCancel={() => setShowImportModal(false)}
-            onComplete={() => {
-              setShowImportModal(false);
-              revalidate();
-            }}
+            onCancel={closeImportModal}
+            onComplete={completeImport}
           >
             {data.pageInfo.results}
           </JellyfinImportModal>
@@ -646,37 +678,30 @@ const UserList = () => {
       <div className="flex flex-col justify-between lg:flex-row lg:items-end">
         <Header>{intl.formatMessage(messages.userlist)}</Header>
         <div className="mt-2 flex flex-grow flex-col lg:flex-grow-0 lg:flex-row">
-          <div className="mb-2 flex flex-grow flex-col justify-between sm:flex-row lg:mb-0 lg:flex-grow-0">
+          <div className="mb-2 flex flex-grow flex-col flex-wrap gap-2 sm:flex-row lg:mb-0 lg:mr-2 lg:flex-grow-0">
             <Button
-              className="mb-2 flex-grow sm:mb-0 sm:mr-2"
+              className="flex-grow"
               buttonType="primary"
               onClick={() => setCreateModal({ isOpen: true })}
             >
               <UserPlusIcon />
               <span>{intl.formatMessage(messages.createlocaluser)}</span>
             </Button>
-            <Button
-              className="flex-grow lg:mr-2"
-              buttonType="primary"
-              onClick={() => setShowImportModal(true)}
-            >
-              <InboxArrowDownIcon />
-              <span>
-                {settings.currentSettings.mediaServerType ===
-                MediaServerType.EMBY
-                  ? intl.formatMessage(messages.importfrommediaserver, {
-                      mediaServerName: ServerType.EMBY,
-                    })
-                  : settings.currentSettings.mediaServerType ===
-                      MediaServerType.PLEX
-                    ? intl.formatMessage(messages.importfrommediaserver, {
-                        mediaServerName: ServerType.PLEX,
-                      })
-                    : intl.formatMessage(messages.importfrommediaserver, {
-                        mediaServerName: ServerType.JELLYFIN,
-                      })}
-              </span>
-            </Button>
+            {importTypes.map((provider) => (
+              <Button
+                className="flex-grow"
+                buttonType="primary"
+                key={provider}
+                onClick={() => setImportModal({ provider, isOpen: true })}
+              >
+                <InboxArrowDownIcon />
+                <span>
+                  {intl.formatMessage(messages.importfrommediaserver, {
+                    mediaServerName: mediaServerNames[provider],
+                  })}
+                </span>
+              </Button>
+            ))}
           </div>
           <div className="mb-2 flex flex-grow flex-col gap-2 sm:flex-row lg:mb-0 lg:flex-grow-0">
             <div className="flex flex-grow lg:flex-grow-0">

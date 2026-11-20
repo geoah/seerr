@@ -6,6 +6,7 @@ Cypress.Commands.add('login', (email, password) => {
     [email, password],
     () => {
       cy.visit('/login');
+      cy.get('[data-testid=seerr-login-button]').click();
 
       cy.get('[data-testid=email]').type(email);
       cy.get('[data-testid=password]').type(password);

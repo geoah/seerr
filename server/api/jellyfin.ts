@@ -18,6 +18,7 @@ export interface JellyfinUserResponse {
   };
   Policy: {
     IsAdministrator: boolean;
+    IsDisabled?: boolean;
   };
   PrimaryImageTag?: string;
 }
@@ -183,7 +184,8 @@ class JellyfinAPI extends ExternalAPI {
   public async login(
     Username?: string,
     Password?: string,
-    ClientIP?: string
+    ClientIP?: string,
+    restrictToConfiguredHost = false
   ): Promise<JellyfinLoginResponse> {
     const authenticate = async (useHeaders: boolean) => {
       const headers =
@@ -195,7 +197,7 @@ class JellyfinAPI extends ExternalAPI {
           Username,
           Pw: Password,
         },
-        { headers }
+        { headers, ...(restrictToConfiguredHost && { maxRedirects: 0 }) }
       );
     };
 
@@ -244,7 +246,9 @@ class JellyfinAPI extends ExternalAPI {
   public async initiateQuickConnect(): Promise<QuickConnectInitiateResponse> {
     try {
       const response = await this.post<QuickConnectInitiateResponse>(
-        '/QuickConnect/Initiate'
+        '/QuickConnect/Initiate',
+        undefined,
+        { maxRedirects: 0 }
       );
 
       return response;
@@ -268,7 +272,7 @@ class JellyfinAPI extends ExternalAPI {
     try {
       const response = await this.get<QuickConnectStatusResponse>(
         '/QuickConnect/Connect',
-        { params: { secret } }
+        { params: { secret }, maxRedirects: 0 }
       );
 
       return response;
@@ -292,7 +296,8 @@ class JellyfinAPI extends ExternalAPI {
     try {
       const response = await this.post<JellyfinLoginResponse>(
         '/Users/AuthenticateWithQuickConnect',
-        { Secret: secret }
+        { Secret: secret },
+        { maxRedirects: 0 }
       );
       return response;
     } catch (e) {
@@ -328,6 +333,14 @@ class JellyfinAPI extends ExternalAPI {
     }
   }
 
+  public async getPublicSystemInfo(): Promise<{
+    Id: string;
+    ProductName: string;
+    ServerName: string;
+  }> {
+    return this.get('/System/Info/Public', { maxRedirects: 0 });
+  }
+
   public async getServerName(): Promise<string> {
     try {
       const serverResponse = await this.get<JellyfinUserResponse>(
@@ -349,9 +362,14 @@ class JellyfinAPI extends ExternalAPI {
     }
   }
 
-  public async getUsers(): Promise<JellyfinUserListResponse> {
+  public async getUsers(
+    restrictToConfiguredHost = false
+  ): Promise<JellyfinUserListResponse> {
     try {
-      const userReponse = await this.get<JellyfinUserResponse[]>(`/Users`);
+      const userReponse = await this.get<JellyfinUserResponse[]>(
+        '/Users',
+        restrictToConfiguredHost ? { maxRedirects: 0 } : undefined
+      );
 
       return { users: userReponse };
     } catch (e) {

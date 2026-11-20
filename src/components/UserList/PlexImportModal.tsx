@@ -21,6 +21,7 @@ interface PlexImportResponse {
 }
 
 const messages = defineMessages('components.UserList', {
+  loadImportUsersFailure: 'Unable to load users from the media server.',
   importfromplex: 'Import Plex Users',
   importfromplexerror: 'Something went wrong while importing Plex users.',
   importfromplexnochanges:
@@ -157,7 +158,10 @@ const PlexImportModal = ({ onCancel, onComplete }: PlexImportProps) => {
         importUsers();
       }}
       okDisabled={
-        isImporting || !data || (data.length > 0 && !selectedUsers.length)
+        isImporting ||
+        !!error ||
+        !data ||
+        (data.length > 0 && !selectedUsers.length)
       }
       okText={intl.formatMessage(
         isImporting
@@ -170,7 +174,12 @@ const PlexImportModal = ({ onCancel, onComplete }: PlexImportProps) => {
       )}
       onCancel={onCancel}
     >
-      {data?.length ? (
+      {error ? (
+        <Alert
+          title={intl.formatMessage(messages.loadImportUsersFailure)}
+          type="error"
+        />
+      ) : data?.length ? (
         <>
           {settings.currentSettings.newPlexLogin && (
             <Alert

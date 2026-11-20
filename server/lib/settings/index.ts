@@ -144,6 +144,7 @@ export interface MainSettings {
   hideRequested: boolean;
   localLogin: boolean;
   mediaServerLogin: boolean;
+  secondaryLoginEnabled: boolean;
   newPlexLogin: boolean;
   discoverRegion: string;
   streamingRegion: string;
@@ -198,6 +199,7 @@ interface FullPublicSettings extends PublicSettings {
   hideRequested: boolean;
   localLogin: boolean;
   mediaServerLogin: boolean;
+  secondaryLoginEnabled: boolean;
   movie4kEnabled: boolean;
   series4kEnabled: boolean;
   discoverRegion: string;
@@ -374,6 +376,11 @@ export type JobId =
   | 'availability-sync'
   | 'process-blocklisted-tags';
 
+export interface SecondaryImportSettings {
+  plex?: { machineId: string; token: string };
+  jellyfin?: { serverId: string; hostname: string; apiKey: string };
+}
+
 export interface AllSettings {
   clientId: string;
   sessionSecret?: string;
@@ -390,6 +397,7 @@ export interface AllSettings {
   jobs: Record<JobId, JobSettings>;
   network: NetworkSettings;
   metadataSettings: MetadataSettings;
+  secondaryImport?: SecondaryImportSettings;
   migrations: string[];
 }
 
@@ -422,6 +430,7 @@ class Settings {
         hideRequested: false,
         localLogin: true,
         mediaServerLogin: true,
+        secondaryLoginEnabled: false,
         newPlexLogin: true,
         discoverRegion: '',
         streamingRegion: '',
@@ -637,6 +646,7 @@ class Settings {
         apiRequestTimeout: 10000,
       },
       migrations: [],
+      secondaryImport: {},
     };
     if (initialSettings) {
       this.data = mergeSettings(this.data, initialSettings);
@@ -710,6 +720,30 @@ class Settings {
     this.data.public = mergeSettings(this.data.public, data);
   }
 
+  get secondaryImport(): SecondaryImportSettings {
+    return (this.data.secondaryImport ??= {});
+  }
+
+  get secondaryLoginConfigured(): boolean {
+    switch (this.main.mediaServerType) {
+      case MediaServerType.PLEX:
+        return !!(this.jellyfin.ip && this.jellyfin.serverId);
+      case MediaServerType.JELLYFIN:
+        return !!this.plex.machineId;
+      default:
+        return false;
+    }
+  }
+
+  get secondaryLoginAvailable(): boolean {
+    return (
+      this.public.initialized &&
+      this.main.mediaServerLogin &&
+      this.main.secondaryLoginEnabled === true &&
+      this.secondaryLoginConfigured
+    );
+  }
+
   get fullPublicSettings(): FullPublicSettings {
     return {
       ...this.data.public,
@@ -720,6 +754,7 @@ class Settings {
       hideRequested: this.data.main.hideRequested,
       localLogin: this.data.main.localLogin,
       mediaServerLogin: this.data.main.mediaServerLogin,
+      secondaryLoginEnabled: this.secondaryLoginAvailable,
       jellyfinExternalHost: this.data.jellyfin.externalHostname,
       jellyfinForgotPasswordUrl: this.data.jellyfin.jellyfinForgotPasswordUrl,
       movie4kEnabled: this.data.radarr.some(

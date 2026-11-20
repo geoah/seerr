@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { before, beforeEach, describe, it, mock } from 'node:test';
 
 import JellyfinAPI from '@server/api/jellyfin';
+import PlexTvAPI from '@server/api/plextv';
 import { ApiErrorCode } from '@server/constants/error';
 import { MediaServerType } from '@server/constants/server';
 import { UserType } from '@server/constants/user';
@@ -164,6 +165,211 @@ function configureJellyfin() {
   settings.jellyfin.useSsl = false;
   settings.jellyfin.urlBase = '';
 }
+
+describe('Secondary provider login', () => {
+  beforeEach(() => {
+    const settings = getSettings();
+    settings.public.initialized = true;
+    settings.main.secondaryLoginEnabled = true;
+    settings.main.mediaServerLogin = true;
+    settings.main.newPlexLogin = true;
+    settings.jellyfin.ip = 'jellyfin.test';
+    settings.jellyfin.serverId = 'server-1';
+    settings.plex.machineId = 'plex-server-1';
+  });
+
+  it('signs in with secondary Quick Connect only while Jellyfin login is enabled', async () => {
+    const settings = getSettings();
+    settings.main.mediaServerType = MediaServerType.PLEX;
+    const agent = request.agent(app);
+    const url = '/auth/jellyfin/quickconnect/authenticate';
+    const body = { secret: defaultInitiateResponse.Secret };
+    const result = await agent.post(url).send(body);
+    assert.equal(result.status, 200);
+    assert.equal((await agent.get('/auth/me')).body.id, result.body.id);
+    assert.equal(settings.main.mediaServerType, MediaServerType.PLEX);
+    settings.main.secondaryLoginEnabled = false;
+    assert.equal((await request(app).post(url).send(body)).status, 403);
+  });
+
+  it('requires the secondary setting before sending Jellyfin credentials', async (t) => {
+    const settings = getSettings();
+    settings.main.mediaServerType = MediaServerType.PLEX;
+    settings.main.secondaryLoginEnabled = false;
+    const login = t.mock.method(JellyfinAPI.prototype, 'login');
+
+    const response = await request(app).post('/auth/jellyfin').send({
+      username: 'jellyfin-user',
+      password: 'example',
+    });
+
+    assert.equal(response.status, 500);
+    assert.equal(login.mock.callCount(), 0);
+    assert.equal(settings.fullPublicSettings.secondaryLoginEnabled, false);
+  });
+
+  it('rejects a request-supplied Jellyfin hostname', async (t) => {
+    getSettings().main.mediaServerType = MediaServerType.PLEX;
+    const login = t.mock.method(JellyfinAPI.prototype, 'login');
+
+    const response = await request(app).post('/auth/jellyfin').send({
+      username: 'jellyfin-user',
+      password: 'example',
+      hostname: 'other.test',
+    });
+
+    assert.equal(response.status, 500);
+    assert.equal(login.mock.callCount(), 0);
+  });
+
+  it('creates a Jellyfin session without linking by email or changing the Plex primary', async (t) => {
+    const settings = getSettings();
+    settings.main.mediaServerType = MediaServerType.PLEX;
+    t.mock.method(JellyfinAPI.prototype, 'login', async () => ({
+      ...defaultAuthenticateResponse,
+      User: { ...defaultAuthenticateResponse.User, Name: 'secondary-jellyfin' },
+    }));
+
+    const agent = request.agent(app);
+    const response = await agent.post('/auth/jellyfin').send({
+      username: 'secondary-jellyfin',
+      password: 'example',
+      email: 'admin@seerr.dev',
+      serverType: MediaServerType.JELLYFIN,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.userType, UserType.JELLYFIN);
+    assert.notEqual(response.body.id, 1);
+    assert.equal(
+      (await agent.get('/auth/me')).body.email,
+      'secondary-jellyfin'
+    );
+    settings.main.localLogin = true;
+    const local = await request(app).post('/auth/local').send({
+      email: 'secondary-jellyfin',
+      password: 'example',
+    });
+    assert.equal(local.status, 403);
+    assert.equal(settings.main.mediaServerType, MediaServerType.PLEX);
+  });
+
+  it('rejects Jellyfin credentials accepted by a different server', async (t) => {
+    getSettings().main.mediaServerType = MediaServerType.PLEX;
+    t.mock.method(JellyfinAPI.prototype, 'login', async () => ({
+      ...defaultAuthenticateResponse,
+      User: { ...defaultAuthenticateResponse.User, ServerId: 'another-server' },
+    }));
+
+    const response = await request(app).post('/auth/jellyfin').send({
+      username: 'secondary-jellyfin',
+      password: 'example',
+    });
+
+    assert.equal(response.status, 403);
+  });
+
+  it('requires access to the configured Plex server for secondary login', async (t) => {
+    getSettings().main.mediaServerType = MediaServerType.JELLYFIN;
+    t.mock.method(PlexTvAPI.prototype, 'getUser', async () => ({
+      id: 87,
+      email: 'plex-user@seerr.dev',
+    }));
+    t.mock.method(PlexTvAPI.prototype, 'getDevices', async () => []);
+
+    const response = await request(app).post('/auth/plex').send({
+      authToken: 'secondary-token',
+    });
+
+    assert.equal(response.status, 403);
+  });
+
+  it('refuses to sign in as a different provider account with a matching Plex email', async (t) => {
+    getSettings().main.mediaServerType = MediaServerType.JELLYFIN;
+    t.mock.method(PlexTvAPI.prototype, 'getUser', async () => ({
+      id: 87,
+      email: 'admin@seerr.dev',
+    }));
+    t.mock.method(PlexTvAPI.prototype, 'getDevices', async () => [
+      {
+        clientIdentifier: 'plex-server-1',
+        provides: ['server'],
+      },
+    ]);
+
+    const response = await request(app).post('/auth/plex').send({
+      authToken: 'secondary-token',
+    });
+
+    assert.equal(response.status, 403);
+    const admin = await getRepository(User).findOneByOrFail({ id: 1 });
+    assert.equal(admin.plexId, 1);
+  });
+
+  it('keeps primary Plex login from linking a Jellyfin account by email', async (t) => {
+    getSettings().main.mediaServerType = MediaServerType.PLEX;
+    await getRepository(User).update(
+      { email: 'demo@seerr.dev' },
+      {
+        userType: UserType.JELLYFIN,
+        jellyfinUserId: 'jellyfin-demo',
+        plexId: null,
+      }
+    );
+    t.mock.method(PlexTvAPI.prototype, 'getUser', async () => ({
+      id: 87,
+      email: 'demo@seerr.dev',
+    }));
+    t.mock.method(PlexTvAPI.prototype, 'checkUserAccess', async () => true);
+
+    const response = await request(app).post('/auth/plex').send({
+      authToken: 'primary-token',
+    });
+
+    assert.equal(response.status, 403);
+    const jellyfinUser = await getRepository(User).findOneByOrFail({
+      email: 'demo@seerr.dev',
+    });
+    assert.equal(jellyfinUser.plexId, null);
+    assert.equal(jellyfinUser.userType, UserType.JELLYFIN);
+  });
+
+  it('creates a Plex session without persisting the token or changing the Jellyfin primary', async (t) => {
+    const settings = getSettings();
+    settings.main.mediaServerType = MediaServerType.JELLYFIN;
+    t.mock.method(PlexTvAPI.prototype, 'getUser', async () => ({
+      id: 87,
+      email: 'plex-user@seerr.dev',
+      username: 'secondary-plex',
+      thumb: '',
+    }));
+    t.mock.method(PlexTvAPI.prototype, 'getDevices', async () => [
+      {
+        clientIdentifier: 'plex-server-1',
+        provides: ['server'],
+      },
+    ]);
+
+    const agent = request.agent(app);
+    const response = await agent.post('/auth/plex').send({
+      authToken: 'secondary-token',
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.userType, UserType.PLEX);
+    assert.notEqual(response.body.id, 1);
+    assert.equal(
+      (await agent.get('/auth/me')).body.email,
+      'plex-user@seerr.dev'
+    );
+    const user = await getRepository(User).findOneOrFail({
+      where: { id: response.body.id },
+      select: { id: true, plexToken: true },
+    });
+    assert.equal(user.plexToken, null);
+    assert.equal(settings.main.mediaServerType, MediaServerType.JELLYFIN);
+  });
+});
 
 describe('POST /auth/jellyfin/quickconnect/initiate', () => {
   beforeEach(() => {

@@ -18,6 +18,11 @@ import type {
   UserWatchDataResponse,
 } from '@server/interfaces/api/userInterfaces';
 import { Permission, hasPermission } from '@server/lib/permissions';
+import {
+  isSecondaryProvider,
+  listSecondaryJellyfinUsers,
+  listSecondaryPlexUsers,
+} from '@server/lib/secondaryUserImport';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -680,6 +685,79 @@ router.delete<{ id: string }>(
   }
 );
 
+async function importSecondaryPlexUsers(plexIds?: string[]) {
+  const userRepository = getRepository(User);
+  const settings = getSettings();
+  const directory = await listSecondaryPlexUsers();
+  const selected = plexIds ? new Set(plexIds) : undefined;
+  const createdUsers: User[] = [];
+  let refreshedUsers = 0;
+
+  for (const member of directory) {
+    const plexId = Number(member.id);
+    const existing = await userRepository.findOneBy({ plexId });
+    if (existing) {
+      if (existing.userType === UserType.PLEX) {
+        existing.plexUsername = member.username;
+        existing.avatar = member.thumb;
+        await userRepository.save(existing);
+        refreshedUsers += 1;
+      }
+    } else if (
+      (!selected || selected.has(member.id)) &&
+      !(await userRepository.existsBy({ email: member.email }))
+    ) {
+      createdUsers.push(
+        await userRepository.save(
+          new User({
+            plexId,
+            plexUsername: member.username,
+            email: member.email,
+            avatar: member.thumb,
+            permissions: settings.main.defaultPermissions,
+            userType: UserType.PLEX,
+          })
+        )
+      );
+    }
+  }
+
+  return { createdUsers: User.filterMany(createdUsers), refreshedUsers };
+}
+
+async function importSecondaryJellyfinUsers(jellyfinUserIds: string[]) {
+  const userRepository = getRepository(User);
+  const settings = getSettings();
+  const directory = await listSecondaryJellyfinUsers();
+  const selected = new Set(jellyfinUserIds.map(normalizeJellyfinGuid));
+  const createdUsers: User[] = [];
+
+  for (const member of directory) {
+    if (
+      selected.has(normalizeJellyfinGuid(member.id)) &&
+      !(await userRepository.existsBy([
+        { jellyfinUserId: member.id },
+        { email: member.email },
+      ]))
+    ) {
+      createdUsers.push(
+        await userRepository.save(
+          new User({
+            jellyfinUserId: member.id,
+            jellyfinUsername: member.username,
+            email: member.email,
+            avatar: member.thumb,
+            permissions: settings.main.defaultPermissions,
+            userType: UserType.JELLYFIN,
+          })
+        )
+      );
+    }
+  }
+
+  return User.filterMany(createdUsers);
+}
+
 router.post(
   '/import-from-plex',
   isAuthenticated(Permission.MANAGE_USERS),
@@ -688,6 +766,19 @@ router.post(
       const settings = getSettings();
       const userRepository = getRepository(User);
       const body = req.body as { plexIds: string[] } | undefined;
+
+      if (isSecondaryProvider('plex')) {
+        try {
+          return res
+            .status(201)
+            .json(await importSecondaryPlexUsers(body?.plexIds));
+        } catch {
+          return next({
+            status: 502,
+            message: 'Unable to import users from the configured Plex server.',
+          });
+        }
+      }
 
       // taken from auth.ts
       const mainUser = await userRepository.findOneOrFail({
@@ -703,13 +794,26 @@ router.post(
         const account = rawUser.$;
 
         if (account.email) {
-          const user = await userRepository
-            .createQueryBuilder('user')
-            .where('user.plexId = :id', { id: account.id })
-            .orWhere('user.email = :email', {
-              email: account.email.toLowerCase(),
-            })
-            .getOne();
+          const plexId = Number(account.id);
+          if (!Number.isSafeInteger(plexId) || plexId <= 0) {
+            continue;
+          }
+
+          const linkedUser = await userRepository.findOneBy({ plexId });
+          const emailOwner = await userRepository.findOneBy({
+            email: account.email,
+          });
+          if (
+            emailOwner &&
+            emailOwner.id !== linkedUser?.id &&
+            (linkedUser ||
+              emailOwner.userType !== UserType.LOCAL ||
+              emailOwner.plexId ||
+              emailOwner.jellyfinUserId)
+          ) {
+            continue;
+          }
+          const user = linkedUser ?? emailOwner;
 
           if (user) {
             // Update the user's avatar with their Plex thumbnail, in case it changed
@@ -720,17 +824,17 @@ router.post(
             // In case the user was previously a local account
             if (user.userType === UserType.LOCAL) {
               user.userType = UserType.PLEX;
-              user.plexId = parseInt(account.id);
+              user.plexId = plexId;
             }
             await userRepository.save(user);
             refreshedUsers += 1;
           } else if (!body || body.plexIds.includes(account.id)) {
-            if (await mainPlexTv.checkUserAccess(parseInt(account.id))) {
+            if (await mainPlexTv.checkUserAccess(plexId)) {
               const newUser = new User({
                 plexUsername: account.username,
                 email: account.email,
                 permissions: settings.main.defaultPermissions,
-                plexId: parseInt(account.id),
+                plexId: plexId,
                 plexToken: '',
                 avatar: account.thumb,
                 userType: UserType.PLEX,
@@ -760,6 +864,27 @@ router.post(
       const settings = getSettings();
       const userRepository = getRepository(User);
       const body = req.body as { jellyfinUserIds: string[] };
+
+      if (isSecondaryProvider('jellyfin')) {
+        if (!Array.isArray(body?.jellyfinUserIds)) {
+          return next({
+            status: 400,
+            message: 'Select at least one Jellyfin user to import.',
+          });
+        }
+
+        try {
+          return res
+            .status(201)
+            .json(await importSecondaryJellyfinUsers(body.jellyfinUserIds));
+        } catch {
+          return next({
+            status: 502,
+            message:
+              'Unable to import users from the configured Jellyfin server.',
+          });
+        }
+      }
 
       // taken from auth.ts
       const admin = await userRepository.findOneOrFail({
@@ -796,6 +921,9 @@ router.post(
         }
 
         const jellyfinUser = jellyfinUsersById.get(jellyfinUserId);
+        if (!jellyfinUser) {
+          continue;
+        }
 
         const user = await userRepository.findOne({
           select: ['id', 'jellyfinUserId'],

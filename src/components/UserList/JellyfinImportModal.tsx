@@ -19,6 +19,7 @@ interface JellyfinImportProps {
 }
 
 const messages = defineMessages('components.UserList', {
+  loadImportUsersFailure: 'Unable to load users from the media server.',
   importfromJellyfin: 'Import {mediaServerName} Users',
   importfromJellyfinerror:
     'Something went wrong while importing {mediaServerName} users.',
@@ -154,13 +155,18 @@ const JellyfinImportModal: React.FC<JellyfinImportProps> = ({
       onOk={() => {
         importUsers();
       }}
-      okDisabled={isImporting || !selectedUsers.length}
+      okDisabled={isImporting || !!error || !selectedUsers.length}
       okText={intl.formatMessage(
         isImporting ? globalMessages.importing : globalMessages.import
       )}
       onCancel={onCancel}
     >
-      {data?.length ? (
+      {error ? (
+        <Alert
+          title={intl.formatMessage(messages.loadImportUsersFailure)}
+          type="error"
+        />
+      ) : data?.length ? (
         <>
           {settings.currentSettings.newPlexLogin && (
             <Alert
