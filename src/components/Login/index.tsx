@@ -1,6 +1,5 @@
 import EmbyLogo from '@app/assets/services/emby-icon-only.svg';
 import JellyfinLogo from '@app/assets/services/jellyfin-icon.svg';
-import PlexLogo from '@app/assets/services/plex.svg';
 import Button from '@app/components/Common/Button';
 import ImageFader from '@app/components/Common/ImageFader';
 import PageTitle from '@app/components/Common/PageTitle';
@@ -40,9 +39,7 @@ const Login = () => {
   const [error, setError] = useState('');
   const [isProcessing, setProcessing] = useState(false);
   const [authToken, setAuthToken] = useState<string | undefined>(undefined);
-  const [mediaServerLogin, setMediaServerLogin] = useState(
-    settings.currentSettings.mediaServerLogin
-  );
+  const [useLocalLogin, setUseLocalLogin] = useState(false);
 
   // Effect that is triggered when the `authToken` comes back from the Plex OAuth
   // We take the token and attempt to sign in. If we get a success message, we will
@@ -81,71 +78,75 @@ const Login = () => {
     revalidateOnFocus: false,
   });
 
-  const mediaServerName =
-    settings.currentSettings.mediaServerType === MediaServerType.PLEX
-      ? ServerType.PLEX
-      : settings.currentSettings.mediaServerType === MediaServerType.JELLYFIN
-        ? ServerType.JELLYFIN
-        : settings.currentSettings.mediaServerType === MediaServerType.EMBY
-          ? ServerType.EMBY
-          : undefined;
+  const {
+    mediaServerType,
+    mediaServerLogin,
+    localLogin,
+    secondaryLoginEnabled,
+  } = settings.currentSettings;
+  const plexLoginEnabled =
+    (mediaServerType === MediaServerType.PLEX && mediaServerLogin) ||
+    (mediaServerType === MediaServerType.JELLYFIN && secondaryLoginEnabled);
+  const secondaryJellyfinLogin =
+    mediaServerType === MediaServerType.PLEX && secondaryLoginEnabled;
+  const credentialServerType = secondaryJellyfinLogin
+    ? MediaServerType.JELLYFIN
+    : mediaServerType;
+  const credentialLoginEnabled =
+    secondaryJellyfinLogin ||
+    (mediaServerLogin &&
+      (mediaServerType === MediaServerType.JELLYFIN ||
+        mediaServerType === MediaServerType.EMBY));
+  const showCredentialLogin =
+    credentialLoginEnabled && (!useLocalLogin || !localLogin);
+  const credentialServerName =
+    credentialServerType === MediaServerType.EMBY
+      ? ServerType.EMBY
+      : ServerType.JELLYFIN;
+  const CredentialServerLogo =
+    credentialServerType === MediaServerType.EMBY ? EmbyLogo : JellyfinLogo;
 
-  const MediaServerLogo =
-    settings.currentSettings.mediaServerType === MediaServerType.PLEX
-      ? PlexLogo
-      : settings.currentSettings.mediaServerType === MediaServerType.JELLYFIN
-        ? JellyfinLogo
-        : settings.currentSettings.mediaServerType === MediaServerType.EMBY
-          ? EmbyLogo
-          : undefined;
-
-  const isJellyfin =
-    settings.currentSettings.mediaServerType === MediaServerType.JELLYFIN ||
-    settings.currentSettings.mediaServerType === MediaServerType.EMBY;
   const mediaServerLoginRef = useRef<HTMLDivElement>(null);
   const localLoginRef = useRef<HTMLDivElement>(null);
-  const loginRef = mediaServerLogin ? mediaServerLoginRef : localLoginRef;
+  const loginRef = showCredentialLogin ? mediaServerLoginRef : localLoginRef;
 
-  const loginFormVisible =
-    (isJellyfin && settings.currentSettings.mediaServerLogin) ||
-    settings.currentSettings.localLogin;
+  const loginFormVisible = credentialLoginEnabled || localLogin;
   const additionalLoginOptions = [
-    settings.currentSettings.mediaServerLogin &&
-      (settings.currentSettings.mediaServerType === MediaServerType.PLEX ? (
-        <PlexLoginButton
-          key="plex"
-          isProcessing={isProcessing}
-          onAuthToken={(authToken) => setAuthToken(authToken)}
-          large={!isJellyfin && !settings.currentSettings.localLogin}
-        />
+    plexLoginEnabled && (
+      <PlexLoginButton
+        key="plex"
+        isProcessing={isProcessing}
+        onAuthToken={(authToken) => setAuthToken(authToken)}
+        large={!loginFormVisible}
+      />
+    ),
+    credentialLoginEnabled &&
+      localLogin &&
+      (showCredentialLogin ? (
+        <Button
+          key="seerr"
+          data-testid="seerr-login-button"
+          className="flex-1 bg-transparent"
+          onClick={() => setUseLocalLogin(true)}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/os_icon.svg"
+            alt={settings.currentSettings.applicationTitle}
+            className="mr-2 h-5"
+          />
+          <span>{settings.currentSettings.applicationTitle}</span>
+        </Button>
       ) : (
-        settings.currentSettings.localLogin &&
-        (mediaServerLogin ? (
-          <Button
-            key="seerr"
-            data-testid="seerr-login-button"
-            className="flex-1 bg-transparent"
-            onClick={() => setMediaServerLogin(false)}
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="/os_icon.svg"
-              alt={settings.currentSettings.applicationTitle}
-              className="mr-2 h-5"
-            />
-            <span>{settings.currentSettings.applicationTitle}</span>
-          </Button>
-        ) : (
-          <Button
-            key="mediaserver"
-            data-testid="mediaserver-login-button"
-            className="flex-1 bg-transparent"
-            onClick={() => setMediaServerLogin(true)}
-          >
-            <MediaServerLogo />
-            <span>{mediaServerName}</span>
-          </Button>
-        ))
+        <Button
+          key="mediaserver"
+          data-testid="mediaserver-login-button"
+          className="flex-1 bg-transparent"
+          onClick={() => setUseLocalLogin(false)}
+        >
+          <CredentialServerLogo />
+          <span>{credentialServerName}</span>
+        </Button>
       )),
   ].filter((o): o is JSX.Element => !!o);
 
@@ -199,7 +200,7 @@ const Login = () => {
             <div className="px-10 py-8">
               <SwitchTransition mode="out-in">
                 <CSSTransition
-                  key={mediaServerLogin ? 'ms' : 'local'}
+                  key={showCredentialLogin ? 'ms' : 'local'}
                   nodeRef={loginRef}
                   timeout={{ enter: 300, exit: 150 }}
                   onEntered={() => {
@@ -215,17 +216,14 @@ const Login = () => {
                   }}
                 >
                   <div ref={loginRef} className="button-container">
-                    {isJellyfin &&
-                    (mediaServerLogin ||
-                      !settings.currentSettings.localLogin) ? (
+                    {showCredentialLogin ? (
                       <JellyfinLogin
-                        serverType={settings.currentSettings.mediaServerType}
+                        serverType={credentialServerType}
+                        secondary={secondaryJellyfinLogin}
                         revalidate={revalidate}
                       />
                     ) : (
-                      settings.currentSettings.localLogin && (
-                        <LocalLogin revalidate={revalidate} />
-                      )
+                      localLogin && <LocalLogin revalidate={revalidate} />
                     )}
                   </div>
                 </CSSTransition>

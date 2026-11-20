@@ -259,6 +259,9 @@ components:
         localLogin:
           type: boolean
           example: true
+        secondaryLoginEnabled:
+          type: boolean
+          default: false
         mediaServerType:
           type: number
           example: 1
@@ -274,6 +277,24 @@ components:
         versionCheck:
           type: boolean
           example: false
+    JellyfinLoginSettings:
+      type: object
+      required:
+        - ip
+        - port
+      properties:
+        ip:
+          type: string
+          example: jellyfin.example.com
+        port:
+          type: integer
+          example: 8096
+        useSsl:
+          type: boolean
+          default: false
+        urlBase:
+          type: string
+          example: /jellyfin
     NetworkSettings:
       type: object
       properties:
@@ -733,6 +754,9 @@ components:
         initialized:
           type: boolean
           example: false
+        secondaryLoginEnabled:
+          type: boolean
+          description: Whether secondary media server login is available
         plexClientIdentifier:
           type: string
           format: uuid
@@ -2338,6 +2362,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JellyfinSettings'
+  /settings/jellyfin/login:
+    get:
+      summary: Get the Jellyfin server address for secondary login
+      tags:
+        - settings
+      responses:
+        '200':
+          description: Jellyfin server address
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JellyfinLoginSettings'
+    post:
+      summary: Set the Jellyfin server address for secondary login
+      tags:
+        - settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JellyfinLoginSettings'
+      responses:
+        '200':
+          description: Validated Jellyfin server address
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JellyfinLoginSettings'
   /settings/jellyfin/library:
     get:
       summary: Get Jellyfin libraries
@@ -2532,6 +2585,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlexSettings'
+  /settings/plex/login:
+    get:
+      summary: Get the Plex server machine ID for secondary login
+      tags:
+        - settings
+      responses:
+        '200':
+          description: Configured machine ID, or an empty string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  machineId:
+                    type: string
+    post:
+      summary: Set the Plex server machine ID for secondary login
+      tags:
+        - settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - machineId
+              properties:
+                machineId:
+                  type: string
+      responses:
+        '200':
+          description: Configured machine ID
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  machineId:
+                    type: string
   /settings/plex/library:
     get:
       summary: Get Plex libraries

@@ -183,7 +183,8 @@ class JellyfinAPI extends ExternalAPI {
   public async login(
     Username?: string,
     Password?: string,
-    ClientIP?: string
+    ClientIP?: string,
+    restrictToConfiguredHost = false
   ): Promise<JellyfinLoginResponse> {
     const authenticate = async (useHeaders: boolean) => {
       const headers =
@@ -195,7 +196,7 @@ class JellyfinAPI extends ExternalAPI {
           Username,
           Pw: Password,
         },
-        { headers }
+        { headers, ...(restrictToConfiguredHost && { maxRedirects: 0 }) }
       );
     };
 
@@ -326,6 +327,14 @@ class JellyfinAPI extends ExternalAPI {
 
       throw new ApiError(e.response.status, ApiErrorCode.InvalidAuthToken);
     }
+  }
+
+  public async getPublicSystemInfo(): Promise<{
+    Id: string;
+    ProductName: string;
+    ServerName: string;
+  }> {
+    return this.get('/System/Info/Public', { maxRedirects: 0 });
   }
 
   public async getServerName(): Promise<string> {

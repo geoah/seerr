@@ -4,6 +4,7 @@ import PlexAPI from '@server/api/plexapi';
 import PlexTvAPI from '@server/api/plextv';
 import TautulliAPI from '@server/api/tautulli';
 import { ApiErrorCode } from '@server/constants/error';
+import { MediaServerType } from '@server/constants/server';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
@@ -38,6 +39,7 @@ import { escapeRegExp, merge, omit, set, sortBy } from 'lodash';
 import { rescheduleJob } from 'node-schedule';
 import path from 'path';
 import semver from 'semver';
+import { IsNull, Not } from 'typeorm';
 import { URL } from 'url';
 import { z } from 'zod';
 import metadataRoutes from './metadata';
@@ -78,8 +80,18 @@ settingsRoutes.get('/main', (req, res, next) => {
   res.status(200).json(filteredMainSettings(req.user, settings.main));
 });
 
-settingsRoutes.post('/main', async (req, res) => {
+settingsRoutes.post('/main', async (req, res, next) => {
   const settings = getSettings();
+
+  if (
+    req.body.secondaryLoginEnabled === true &&
+    !(settings.public.initialized && settings.secondaryLoginConfigured)
+  ) {
+    return next({
+      status: 400,
+      message: 'Configure the secondary media server first.',
+    });
+  }
 
   settings.main = merge(settings.main, req.body);
   await settings.save();
@@ -123,6 +135,14 @@ settingsRoutes.get('/plex', (_req, res) => {
 settingsRoutes.post('/plex', async (req, res, next) => {
   const userRepository = getRepository(User);
   const settings = getSettings();
+
+  if (settings.main.mediaServerType === MediaServerType.JELLYFIN) {
+    return next({
+      status: 400,
+      message: 'Use the secondary login settings to configure Plex.',
+    });
+  }
+
   try {
     const admin = await userRepository.findOneOrFail({
       select: { id: true, plexToken: true },
@@ -155,6 +175,44 @@ settingsRoutes.post('/plex', async (req, res, next) => {
   }
 
   return res.status(200).json(settings.plex);
+});
+
+settingsRoutes.get('/plex/login', (_req, res) => {
+  const settings = getSettings();
+  return res.status(200).json({ machineId: settings.plex.machineId ?? '' });
+});
+
+settingsRoutes.post('/plex/login', async (req, res, next) => {
+  const settings = getSettings();
+  if (
+    !settings.public.initialized ||
+    settings.main.mediaServerType !== MediaServerType.JELLYFIN
+  ) {
+    return next({
+      status: 400,
+      message:
+        'Plex can be configured for secondary login on an initialized Jellyfin instance.',
+    });
+  }
+
+  const result = z
+    .object({
+      machineId: z
+        .string()
+        .trim()
+        .regex(/^[a-zA-Z0-9-]{1,128}$/),
+    })
+    .safeParse(req.body);
+  if (!result.success) {
+    return next({
+      status: 400,
+      message: 'A valid Plex server machine ID is required.',
+    });
+  }
+
+  settings.plex.machineId = result.data.machineId;
+  await settings.save();
+  return res.status(200).json({ machineId: settings.plex.machineId });
 });
 
 settingsRoutes.get('/plex/devices/servers', async (req, res, next) => {
@@ -308,6 +366,13 @@ settingsRoutes.post('/jellyfin', async (req, res, next) => {
   const userRepository = getRepository(User);
   const settings = getSettings();
 
+  if (settings.main.mediaServerType === MediaServerType.PLEX) {
+    return next({
+      status: 400,
+      message: 'Use the secondary login settings to configure Jellyfin.',
+    });
+  }
+
   try {
     const admin = await userRepository.findOneOrFail({
       where: { id: 1 },
@@ -359,6 +424,83 @@ settingsRoutes.post('/jellyfin', async (req, res, next) => {
   }
 
   return res.status(200).json(settings.jellyfin);
+});
+
+const jellyfinLoginSettings = z.object({
+  ip: z
+    .string()
+    .trim()
+    .min(1)
+    .regex(/^[a-zA-Z0-9.:[\]-]+$/),
+  port: z.number().int().min(1).max(65535),
+  useSsl: z.boolean().default(false),
+  urlBase: z
+    .string()
+    .regex(/^(?:\/(?!\/)[^?#\\]*)?$/)
+    .default(''),
+});
+
+settingsRoutes.get('/jellyfin/login', (_req, res) => {
+  const { ip, port, useSsl, urlBase } = getSettings().jellyfin;
+  return res.status(200).json({ ip, port, useSsl, urlBase });
+});
+
+settingsRoutes.post('/jellyfin/login', async (req, res, next) => {
+  const settings = getSettings();
+  const userRepository = getRepository(User);
+  if (
+    !settings.public.initialized ||
+    settings.main.mediaServerType !== MediaServerType.PLEX
+  ) {
+    return next({
+      status: 400,
+      message:
+        'Jellyfin can be configured for secondary login on an initialized Plex instance.',
+    });
+  }
+
+  const result = jellyfinLoginSettings.safeParse(req.body);
+  if (!result.success) {
+    return next({
+      status: 400,
+      message: 'Enter a valid Jellyfin server address.',
+    });
+  }
+
+  try {
+    const hostname = new URL(getHostname(result.data)).href;
+    const jellyfinClient = new JellyfinAPI(hostname);
+    const server = await jellyfinClient.getPublicSystemInfo();
+    if (server.ProductName !== 'Jellyfin Server' || !server.Id) {
+      return next({
+        status: 400,
+        message: 'The secondary server must be Jellyfin.',
+      });
+    }
+
+    if (
+      settings.jellyfin.serverId !== server.Id &&
+      (await userRepository.existsBy({ jellyfinUserId: Not(IsNull()) }))
+    ) {
+      return next({
+        status: 400,
+        message:
+          'The Jellyfin server cannot change while Seerr has accounts linked to it.',
+      });
+    }
+
+    settings.jellyfin = {
+      ...settings.jellyfin,
+      ...result.data,
+      name: server.ServerName,
+      serverId: server.Id,
+    };
+    await settings.save();
+
+    return res.status(200).json(result.data);
+  } catch {
+    return next({ status: 400, message: 'Unable to connect to Jellyfin.' });
+  }
 });
 
 settingsRoutes.get('/jellyfin/library', (_req, res) => {

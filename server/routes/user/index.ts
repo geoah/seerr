@@ -703,13 +703,26 @@ router.post(
         const account = rawUser.$;
 
         if (account.email) {
-          const user = await userRepository
-            .createQueryBuilder('user')
-            .where('user.plexId = :id', { id: account.id })
-            .orWhere('user.email = :email', {
-              email: account.email.toLowerCase(),
-            })
-            .getOne();
+          const plexId = Number(account.id);
+          if (!Number.isSafeInteger(plexId) || plexId <= 0) {
+            continue;
+          }
+
+          const linkedUser = await userRepository.findOneBy({ plexId });
+          const emailOwner = await userRepository.findOneBy({
+            email: account.email,
+          });
+          if (
+            emailOwner &&
+            emailOwner.id !== linkedUser?.id &&
+            (linkedUser ||
+              emailOwner.userType !== UserType.LOCAL ||
+              emailOwner.plexId ||
+              emailOwner.jellyfinUserId)
+          ) {
+            continue;
+          }
+          const user = linkedUser ?? emailOwner;
 
           if (user) {
             // Update the user's avatar with their Plex thumbnail, in case it changed
@@ -720,17 +733,17 @@ router.post(
             // In case the user was previously a local account
             if (user.userType === UserType.LOCAL) {
               user.userType = UserType.PLEX;
-              user.plexId = parseInt(account.id);
+              user.plexId = plexId;
             }
             await userRepository.save(user);
             refreshedUsers += 1;
           } else if (!body || body.plexIds.includes(account.id)) {
-            if (await mainPlexTv.checkUserAccess(parseInt(account.id))) {
+            if (await mainPlexTv.checkUserAccess(plexId)) {
               const newUser = new User({
                 plexUsername: account.username,
                 email: account.email,
                 permissions: settings.main.defaultPermissions,
-                plexId: parseInt(account.id),
+                plexId: plexId,
                 plexToken: '',
                 avatar: account.thumb,
                 userType: UserType.PLEX,

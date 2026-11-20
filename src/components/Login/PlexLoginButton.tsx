@@ -4,7 +4,7 @@ import { SmallLoadingSpinner } from '@app/components/Common/LoadingSpinner';
 import usePlexLogin from '@app/hooks/usePlexLogin';
 import defineMessages from '@app/utils/defineMessages';
 import { Fragment } from 'react';
-import { FormattedMessage } from 'react-intl';
+import { FormattedMessage, useIntl } from 'react-intl';
 
 const messages = defineMessages('components.Login', {
   loginwithapp: 'Login with {appName}',
@@ -23,6 +23,7 @@ const PlexLoginButton = ({
   isProcessing,
   large,
 }: PlexLoginButtonProps) => {
+  const intl = useIntl();
   const { loading, login } = usePlexLogin({ onAuthToken, onError });
 
   return (
@@ -31,6 +32,9 @@ const PlexLoginButton = ({
       onClick={login}
       disabled={loading || isProcessing}
       data-testid="plex-login-button"
+      aria-label={intl.formatMessage(messages.loginwithapp, {
+        appName: 'Plex',
+      })}
     >
       {loading && (
         <div className="absolute right-0 mr-4 h-4 w-4">

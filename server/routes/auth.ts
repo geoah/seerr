@@ -16,6 +16,7 @@ import { getAppVersion } from '@server/utils/appVersion';
 import { getHostname } from '@server/utils/getHostname';
 import axios from 'axios';
 import { Router } from 'express';
+import gravatarUrl from 'gravatar-url';
 import net from 'net';
 import validator from 'validator';
 import { z } from 'zod';
@@ -78,10 +79,12 @@ authRoutes.post('/plex', async (req, res, next) => {
     });
   }
 
+  const secondary = settings.main.mediaServerType === MediaServerType.JELLYFIN;
   if (
-    settings.main.mediaServerType != MediaServerType.NOT_CONFIGURED &&
+    settings.main.mediaServerType !== MediaServerType.NOT_CONFIGURED &&
     (settings.main.mediaServerLogin === false ||
-      settings.main.mediaServerType != MediaServerType.PLEX)
+      (settings.main.mediaServerType !== MediaServerType.PLEX &&
+        !(secondary && settings.secondaryLoginAvailable)))
   ) {
     return res.status(500).json({ error: 'Plex login is disabled' });
   }
@@ -90,14 +93,67 @@ authRoutes.post('/plex', async (req, res, next) => {
     const plextv = new PlexTvAPI(body.authToken);
     const account = await plextv.getUser();
 
-    // Next let's see if the user already exists
-    let user = await userRepository
-      .createQueryBuilder('user')
-      .where('user.plexId = :id', { id: account.id })
-      .orWhere('user.email = :email', {
-        email: account.email.toLowerCase(),
-      })
-      .getOne();
+    if (!Number.isSafeInteger(account.id) || account.id <= 0) {
+      return next({ status: 403, message: 'Access denied.' });
+    }
+
+    if (secondary) {
+      const machineId = settings.plex.machineId;
+      const devices = await plextv.getDevices();
+      if (
+        settings.main.mediaServerType !== MediaServerType.JELLYFIN ||
+        !settings.secondaryLoginAvailable ||
+        machineId !== settings.plex.machineId ||
+        !devices?.some(
+          (device) =>
+            device.clientIdentifier === machineId &&
+            device.provides.includes('server')
+        ) ||
+        !(await userRepository.existsBy({ id: 1 }))
+      ) {
+        return next({ status: 403, message: 'Access denied.' });
+      }
+
+      let user = await userRepository.findOneBy({ plexId: account.id });
+      if (!user) {
+        if (
+          !settings.main.newPlexLogin ||
+          (await userRepository.existsBy({ email: account.email }))
+        ) {
+          return next({ status: 403, message: 'Access denied.' });
+        }
+
+        user = await userRepository.save(
+          new User({
+            email: account.email,
+            plexUsername: account.username,
+            plexId: account.id,
+            permissions: settings.main.defaultPermissions,
+            avatar: account.thumb,
+            userType: UserType.PLEX,
+          })
+        );
+      }
+
+      if (req.session) {
+        req.session.userId = user.id;
+      }
+      return res.status(200).json(user.filter());
+    }
+
+    let user = await userRepository.findOneBy({ plexId: account.id });
+    if (!user) {
+      // Preserve linking for existing local users that have no provider identity.
+      user = await userRepository
+        .createQueryBuilder('user')
+        .where('user.email = :email', { email: account.email.toLowerCase() })
+        .andWhere('user.plexId IS NULL AND user.jellyfinUserId IS NULL')
+        .getOne();
+    }
+
+    if (!user && (await userRepository.existsBy({ email: account.email }))) {
+      return next({ status: 403, message: 'Access denied.' });
+    }
 
     if (!user && !(await userRepository.count())) {
       user = new User({
@@ -117,28 +173,14 @@ authRoutes.post('/plex', async (req, res, next) => {
       await userRepository.save(user);
     } else {
       const mainUser = await userRepository.findOneOrFail({
-        select: { id: true, plexToken: true, plexId: true, email: true },
+        select: { id: true, plexToken: true, plexId: true },
         where: { id: 1 },
       });
       const mainPlexTv = new PlexTvAPI(mainUser.plexToken ?? '');
 
-      if (!account.id) {
-        logger.error('Plex ID was missing from Plex.tv response', {
-          label: 'API',
-          ip: req.ip,
-          email: account.email,
-          plexUsername: account.username,
-        });
-
-        return next({
-          status: 500,
-          message: 'Something went wrong. Try again.',
-        });
-      }
-
       if (
         account.id === mainUser.plexId ||
-        (account.email === mainUser.email && !mainUser.plexId) ||
+        (user?.id === mainUser.id && !mainUser.plexId) ||
         (await mainPlexTv.checkUserAccess(account.id))
       ) {
         if (user) {
@@ -266,29 +308,33 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
     serverType?: number;
   };
 
-  //Make sure jellyfin login is enabled, but only if jellyfin && Emby is not already configured
+  const primary = settings.main.mediaServerType;
+  const initialSetup = primary === MediaServerType.NOT_CONFIGURED;
+  const secondary = primary === MediaServerType.PLEX;
+  const providerName =
+    primary === MediaServerType.EMBY ? ServerType.EMBY : ServerType.JELLYFIN;
   if (
-    // media server not configured, allow login for setup
-    settings.main.mediaServerType != MediaServerType.NOT_CONFIGURED &&
+    !initialSetup &&
     (settings.main.mediaServerLogin === false ||
-      // media server is neither jellyfin or emby
-      (settings.main.mediaServerType !== MediaServerType.JELLYFIN &&
-        settings.main.mediaServerType !== MediaServerType.EMBY))
+      (primary !== MediaServerType.JELLYFIN &&
+        primary !== MediaServerType.EMBY &&
+        !(secondary && settings.secondaryLoginAvailable)))
   ) {
     return res.status(500).json({ error: 'Jellyfin login is disabled' });
   }
 
   if (!body.username) {
     return res.status(500).json({ error: 'You must provide an username' });
-  } else if (settings.jellyfin.ip !== '' && body.hostname) {
+  } else if (body.hostname && (!initialSetup || settings.jellyfin.ip)) {
     return res
       .status(500)
       .json({ error: 'Jellyfin hostname already configured' });
-  } else if (settings.jellyfin.ip === '' && !body.hostname) {
+  } else if (!settings.jellyfin.ip && !body.hostname) {
     return res.status(500).json({ error: 'No hostname provided.' });
   }
 
   try {
+    const serverId = settings.jellyfin.serverId;
     const hostname =
       settings.jellyfin.ip !== ''
         ? getHostname()
@@ -332,8 +378,52 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
     const account = await jellyfinserver.login(
       body.username,
       body.password,
-      clientIp
+      clientIp,
+      secondary
     );
+
+    if (secondary) {
+      if (
+        !account.User?.Id ||
+        account.User.ServerId !== serverId ||
+        serverId !== settings.jellyfin.serverId ||
+        settings.main.mediaServerType !== MediaServerType.PLEX ||
+        !settings.secondaryLoginAvailable ||
+        !(await userRepository.existsBy({ id: 1 }))
+      ) {
+        return next({ status: 403, message: 'Access denied.' });
+      }
+
+      user = await userRepository.findOneBy({
+        jellyfinUserId: account.User.Id,
+        userType: UserType.JELLYFIN,
+      });
+
+      if (!user) {
+        const email = account.User.Name;
+        if (
+          !settings.main.newPlexLogin ||
+          (await userRepository.existsBy({ email }))
+        ) {
+          return next({ status: 403, message: 'Access denied.' });
+        }
+
+        user = new User({
+          email,
+          jellyfinUsername: account.User.Name,
+          jellyfinUserId: account.User.Id,
+          permissions: settings.main.defaultPermissions,
+          userType: UserType.JELLYFIN,
+          avatar: gravatarUrl(email, { default: 'mm', size: 200 }),
+        });
+        await userRepository.save(user);
+      }
+
+      if (req.session) {
+        req.session.userId = user.id;
+      }
+      return res.status(200).json(user.filter());
+    }
 
     // Next let's see if the user already exists
     user = await userRepository.findOne({
@@ -341,10 +431,7 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
     });
 
     const missingAdminUser = !user && !(await userRepository.count());
-    if (
-      missingAdminUser ||
-      settings.main.mediaServerType === MediaServerType.NOT_CONFIGURED
-    ) {
+    if (missingAdminUser || initialSetup) {
       // Check if user is admin on jellyfin
       if (account.User.Policy.IsAdministrator === false) {
         throw new ApiError(403, ApiErrorCode.NotAdmin);
@@ -541,11 +628,7 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
     switch (e.errorCode) {
       case ApiErrorCode.InvalidUrl:
         logger.error(
-          `The provided ${
-            settings.main.mediaServerType === MediaServerType.JELLYFIN
-              ? ServerType.JELLYFIN
-              : ServerType.EMBY
-          } is invalid or the server is not reachable.`,
+          `The provided ${providerName} is invalid or the server is not reachable.`,
           {
             label: 'Auth',
             error: e.errorCode,
@@ -564,24 +647,17 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
         });
 
       case ApiErrorCode.ConnectionError:
-        logger.error(
-          `Unable to reach the ${
-            settings.main.mediaServerType === MediaServerType.JELLYFIN
-              ? ServerType.JELLYFIN
-              : ServerType.EMBY
-          } server.`,
-          {
-            label: 'Auth',
-            error: e.errorCode,
-            status: e.statusCode,
-            hostname: getHostname({
-              useSsl: body.useSsl,
-              ip: body.hostname,
-              port: body.port,
-              urlBase: body.urlBase,
-            }),
-          }
-        );
+        logger.error(`Unable to reach the ${providerName} server.`, {
+          label: 'Auth',
+          error: e.errorCode,
+          status: e.statusCode,
+          hostname: getHostname({
+            useSsl: body.useSsl,
+            ip: body.hostname,
+            port: body.port,
+            urlBase: body.urlBase,
+          }),
+        });
         return next({
           status: e.statusCode,
           message: e.errorCode,

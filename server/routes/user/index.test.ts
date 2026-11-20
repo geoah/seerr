@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { before, describe, it } from 'node:test';
 
+import PlexTvAPI from '@server/api/plextv';
 import { MediaStatus, MediaType } from '@server/constants/media';
+import { UserType } from '@server/constants/user';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { User } from '@server/entity/User';
@@ -73,6 +75,42 @@ async function loginAs(email: string, password: string) {
     settings.main.localLogin = priorLocalLogin;
   }
 }
+
+describe('POST /user/import-from-plex', () => {
+  it('preserves a Jellyfin account when a Plex share has the same email', async (t) => {
+    const userRepository = getRepository(User);
+    await userRepository.update(
+      { email: 'demo@seerr.dev' },
+      {
+        userType: UserType.JELLYFIN,
+        plexId: null,
+        jellyfinUserId: 'jellyfin-demo',
+      }
+    );
+    t.mock.method(PlexTvAPI.prototype, 'getUsers', async () => ({
+      MediaContainer: {
+        User: [
+          { $: { id: '99', email: 'demo@seerr.dev', username: 'plex-demo' } },
+        ],
+      },
+    }));
+    t.mock.method(PlexTvAPI.prototype, 'checkUserAccess', async () => true);
+
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const response = await admin
+      .post('/user/import-from-plex')
+      .send({ plexIds: ['99'] });
+
+    assert.equal(response.status, 201);
+    assert.equal(response.body.refreshedUsers, 0);
+    assert.deepEqual(response.body.createdUsers, []);
+    const jellyfinUser = await userRepository.findOneByOrFail({
+      email: 'demo@seerr.dev',
+    });
+    assert.equal(jellyfinUser.plexId, null);
+    assert.notEqual(jellyfinUser.plexUsername, 'plex-demo');
+  });
+});
 
 describe('GET /user/:id/watchlist', () => {
   it('omits notification settings from every requestedBy in the page', async () => {

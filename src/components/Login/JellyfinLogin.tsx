@@ -39,9 +39,14 @@ const messages = defineMessages('components.Login', {
 interface JellyfinLoginProps {
   revalidate: () => void;
   serverType?: MediaServerType;
+  secondary?: boolean;
 }
 
-const JellyfinLogin = ({ revalidate, serverType }: JellyfinLoginProps) => {
+const JellyfinLogin = ({
+  revalidate,
+  serverType,
+  secondary = false,
+}: JellyfinLoginProps) => {
   const toasts = useToasts();
   const intl = useIntl();
   const settings = useSettings();
@@ -178,7 +183,7 @@ const JellyfinLogin = ({ revalidate, serverType }: JellyfinLoginProps) => {
                         <div className="error">{errors.password}</div>
                       )}
                       <div className="flex-grow" />
-                      {baseUrl && (
+                      {!secondary && baseUrl && (
                         <a
                           href={
                             jellyfinForgotPasswordUrl
@@ -218,7 +223,7 @@ const JellyfinLogin = ({ revalidate, serverType }: JellyfinLoginProps) => {
         }}
       </Formik>
 
-      {serverType === MediaServerType.JELLYFIN && (
+      {!secondary && serverType === MediaServerType.JELLYFIN && (
         <div className="mt-4">
           <Button
             buttonType="ghost"
