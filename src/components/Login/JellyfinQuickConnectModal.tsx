@@ -8,7 +8,7 @@ const messages = defineMessages('components.Login.JellyfinQuickConnectModal', {
   title: 'Quick Connect',
   subtitle: 'Sign in with Quick Connect',
   instructions: 'Enter this code in your {mediaServerName} app',
-  cancel: 'Cancel',
+  usePassword: 'Use password instead',
 });
 
 interface JellyfinQuickConnectModalProps {
@@ -37,7 +37,7 @@ const JellyfinQuickConnectModal = ({
       show
       title={intl.formatMessage(messages.title)}
       subTitle={intl.formatMessage(messages.subtitle)}
-      cancelText={intl.formatMessage(messages.cancel)}
+      cancelText={intl.formatMessage(messages.usePassword)}
       instructionsMessage={intl.formatMessage(messages.instructions, {
         mediaServerName,
       })}

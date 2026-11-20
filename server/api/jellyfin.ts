@@ -245,7 +245,9 @@ class JellyfinAPI extends ExternalAPI {
   public async initiateQuickConnect(): Promise<QuickConnectInitiateResponse> {
     try {
       const response = await this.post<QuickConnectInitiateResponse>(
-        '/QuickConnect/Initiate'
+        '/QuickConnect/Initiate',
+        undefined,
+        { maxRedirects: 0 }
       );
 
       return response;
@@ -269,7 +271,7 @@ class JellyfinAPI extends ExternalAPI {
     try {
       const response = await this.get<QuickConnectStatusResponse>(
         '/QuickConnect/Connect',
-        { params: { secret } }
+        { params: { secret }, maxRedirects: 0 }
       );
 
       return response;
@@ -293,7 +295,8 @@ class JellyfinAPI extends ExternalAPI {
     try {
       const response = await this.post<JellyfinLoginResponse>(
         '/Users/AuthenticateWithQuickConnect',
-        { Secret: secret }
+        { Secret: secret },
+        { maxRedirects: 0 }
       );
       return response;
     } catch (e) {

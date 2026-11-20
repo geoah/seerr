@@ -178,6 +178,20 @@ describe('Secondary provider login', () => {
     settings.plex.machineId = 'plex-server-1';
   });
 
+  it('signs in with secondary Quick Connect only while Jellyfin login is enabled', async () => {
+    const settings = getSettings();
+    settings.main.mediaServerType = MediaServerType.PLEX;
+    const agent = request.agent(app);
+    const url = '/auth/jellyfin/quickconnect/authenticate';
+    const body = { secret: defaultInitiateResponse.Secret };
+    const result = await agent.post(url).send(body);
+    assert.equal(result.status, 200);
+    assert.equal((await agent.get('/auth/me')).body.id, result.body.id);
+    assert.equal(settings.main.mediaServerType, MediaServerType.PLEX);
+    settings.main.secondaryLoginEnabled = false;
+    assert.equal((await request(app).post(url).send(body)).status, 403);
+  });
+
   it('requires the secondary setting before sending Jellyfin credentials', async (t) => {
     const settings = getSettings();
     settings.main.mediaServerType = MediaServerType.PLEX;

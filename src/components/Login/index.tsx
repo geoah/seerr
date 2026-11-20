@@ -9,6 +9,7 @@ import LocalLogin from '@app/components/Login/LocalLogin';
 import PlexLoginButton from '@app/components/Login/PlexLoginButton';
 import useSettings from '@app/hooks/useSettings';
 import { useUser } from '@app/hooks/useUser';
+import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
 import { Transition } from '@headlessui/react';
 import { XCircleIcon } from '@heroicons/react/24/solid';
@@ -16,9 +17,8 @@ import { MediaServerType, ServerType } from '@server/constants/server';
 import axios from 'axios';
 import { useRouter } from 'next/dist/client/router';
 import Image from 'next/image';
-import { useEffect, useRef, useState, type JSX } from 'react';
+import { useEffect, useState } from 'react';
 import { useIntl } from 'react-intl';
-import { CSSTransition, SwitchTransition } from 'react-transition-group';
 import useSWR from 'swr';
 
 const messages = defineMessages('components.Login', {
@@ -27,7 +27,7 @@ const messages = defineMessages('components.Login', {
   signinwithplex: 'Use your Plex account',
   signinwithjellyfin: 'Use your {mediaServerName} account',
   signinwithoverseerr: 'Use your {applicationTitle} account',
-  orsigninwith: 'Or sign in with',
+  loginwithapp: 'Login with {appName}',
 });
 
 const Login = () => {
@@ -39,7 +39,7 @@ const Login = () => {
   const [error, setError] = useState('');
   const [isProcessing, setProcessing] = useState(false);
   const [authToken, setAuthToken] = useState<string | undefined>(undefined);
-  const [useLocalLogin, setUseLocalLogin] = useState(false);
+  const [form, setForm] = useState<'media' | 'local' | null>(null);
 
   // Effect that is triggered when the `authToken` comes back from the Plex OAuth
   // We take the token and attempt to sign in. If we get a success message, we will
@@ -97,58 +97,12 @@ const Login = () => {
     (mediaServerLogin &&
       (mediaServerType === MediaServerType.JELLYFIN ||
         mediaServerType === MediaServerType.EMBY));
-  const showCredentialLogin =
-    credentialLoginEnabled && (!useLocalLogin || !localLogin);
   const credentialServerName =
     credentialServerType === MediaServerType.EMBY
       ? ServerType.EMBY
       : ServerType.JELLYFIN;
   const CredentialServerLogo =
     credentialServerType === MediaServerType.EMBY ? EmbyLogo : JellyfinLogo;
-
-  const mediaServerLoginRef = useRef<HTMLDivElement>(null);
-  const localLoginRef = useRef<HTMLDivElement>(null);
-  const loginRef = showCredentialLogin ? mediaServerLoginRef : localLoginRef;
-
-  const loginFormVisible = credentialLoginEnabled || localLogin;
-  const additionalLoginOptions = [
-    plexLoginEnabled && (
-      <PlexLoginButton
-        key="plex"
-        isProcessing={isProcessing}
-        onAuthToken={(authToken) => setAuthToken(authToken)}
-        large={!loginFormVisible}
-      />
-    ),
-    credentialLoginEnabled &&
-      localLogin &&
-      (showCredentialLogin ? (
-        <Button
-          key="seerr"
-          data-testid="seerr-login-button"
-          className="flex-1 bg-transparent"
-          onClick={() => setUseLocalLogin(true)}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/os_icon.svg"
-            alt={settings.currentSettings.applicationTitle}
-            className="mr-2 h-5"
-          />
-          <span>{settings.currentSettings.applicationTitle}</span>
-        </Button>
-      ) : (
-        <Button
-          key="mediaserver"
-          data-testid="mediaserver-login-button"
-          className="flex-1 bg-transparent"
-          onClick={() => setUseLocalLogin(false)}
-        >
-          <CredentialServerLogo />
-          <span>{credentialServerName}</span>
-        </Button>
-      )),
-  ].filter((o): o is JSX.Element => !!o);
 
   return (
     <div className="relative flex min-h-screen flex-col bg-gray-900 py-14">
@@ -198,59 +152,77 @@ const Login = () => {
               </div>
             </Transition>
             <div className="px-10 py-8">
-              <SwitchTransition mode="out-in">
-                <CSSTransition
-                  key={showCredentialLogin ? 'ms' : 'local'}
-                  nodeRef={loginRef}
-                  timeout={{ enter: 300, exit: 150 }}
-                  onEntered={() => {
-                    document
-                      .querySelector<HTMLInputElement>('#email, #username')
-                      ?.focus();
-                  }}
-                  classNames={{
-                    enter: 'opacity-0',
-                    enterActive: 'transition-opacity duration-300 opacity-100',
-                    exit: 'opacity-100',
-                    exitActive: 'transition-opacity duration-150 opacity-0',
-                  }}
-                >
-                  <div ref={loginRef} className="button-container">
-                    {showCredentialLogin ? (
-                      <JellyfinLogin
-                        serverType={credentialServerType}
-                        secondary={secondaryJellyfinLogin}
-                        revalidate={revalidate}
-                      />
-                    ) : (
-                      localLogin && <LocalLogin revalidate={revalidate} />
-                    )}
-                  </div>
-                </CSSTransition>
-              </SwitchTransition>
-
-              {additionalLoginOptions.length > 0 &&
-                (loginFormVisible ? (
-                  <div className="flex items-center py-5">
-                    <div className="flex-grow border-t border-gray-600" />
-                    <span className="mx-2 flex-shrink text-sm text-gray-400">
-                      {intl.formatMessage(messages.orsigninwith)}
-                    </span>
-                    <div className="flex-grow border-t border-gray-600" />
-                  </div>
-                ) : (
+              {form === 'local' && localLogin ? (
+                <LocalLogin revalidate={revalidate} />
+              ) : form === 'media' && credentialLoginEnabled ? (
+                <JellyfinLogin
+                  serverType={credentialServerType}
+                  secondary={secondaryJellyfinLogin}
+                  revalidate={revalidate}
+                />
+              ) : (
+                <>
                   <h2 className="mb-6 text-center text-lg font-bold text-neutral-200">
                     {intl.formatMessage(messages.signinheader)}
                   </h2>
-                ))}
-
-              <div
-                className={`flex w-full flex-wrap gap-2 ${
-                  !loginFormVisible ? 'flex-col' : ''
-                }`}
-              >
-                {additionalLoginOptions}
-              </div>
+                  <div className="flex flex-col gap-3">
+                    {plexLoginEnabled && (
+                      <PlexLoginButton
+                        large
+                        isProcessing={isProcessing}
+                        onAuthToken={setAuthToken}
+                        onError={setError}
+                      />
+                    )}
+                    {credentialLoginEnabled && (
+                      <Button
+                        data-testid="mediaserver-login-button"
+                        onClick={() => {
+                          setError('');
+                          setForm('media');
+                        }}
+                      >
+                        <CredentialServerLogo
+                          className="mr-2 h-5 w-5"
+                          aria-hidden="true"
+                        />
+                        {intl.formatMessage(messages.loginwithapp, {
+                          appName: credentialServerName,
+                        })}
+                      </Button>
+                    )}
+                    {localLogin && (
+                      <Button
+                        data-testid="seerr-login-button"
+                        onClick={() => {
+                          setError('');
+                          setForm('local');
+                        }}
+                      >
+                        <Image
+                          src="/os_icon.svg"
+                          width={20}
+                          height={20}
+                          alt=""
+                          className="mr-2"
+                        />
+                        {intl.formatMessage(messages.loginwithapp, {
+                          appName: settings.currentSettings.applicationTitle,
+                        })}
+                      </Button>
+                    )}
+                  </div>
+                </>
+              )}
+              {form && (
+                <Button
+                  buttonType="ghost"
+                  className="mt-4 w-full"
+                  onClick={() => setForm(null)}
+                >
+                  {intl.formatMessage(globalMessages.back)}
+                </Button>
+              )}
             </div>
           </>
         </div>

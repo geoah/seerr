@@ -1,4 +1,4 @@
-import JellyfinAPI from '@server/api/jellyfin';
+import JellyfinAPI, { type JellyfinLoginResponse } from '@server/api/jellyfin';
 import PlexTvAPI from '@server/api/plextv';
 import { ApiErrorCode } from '@server/constants/error';
 import { MediaServerType, ServerType } from '@server/constants/server';
@@ -294,6 +294,51 @@ function getUserAvatarUrl(user: User): string {
   return `/avatarproxy/${user.jellyfinUserId}?v=${user.avatarVersion}`;
 }
 
+async function secondaryJellyfinUser(
+  account: JellyfinLoginResponse,
+  serverId: string
+) {
+  const settings = getSettings();
+  const userRepository = getRepository(User);
+  if (
+    !account.User?.Id ||
+    account.User.ServerId !== serverId ||
+    serverId !== settings.jellyfin.serverId ||
+    settings.main.mediaServerType !== MediaServerType.PLEX ||
+    !settings.secondaryLoginAvailable ||
+    !(await userRepository.existsBy({ id: 1 }))
+  ) {
+    return null;
+  }
+
+  let user = await userRepository.findOneBy({
+    jellyfinUserId: account.User.Id,
+    userType: UserType.JELLYFIN,
+  });
+
+  if (!user) {
+    const email = account.User.Name;
+    if (
+      !settings.main.newPlexLogin ||
+      (await userRepository.existsBy({ email }))
+    ) {
+      return null;
+    }
+
+    user = new User({
+      email,
+      jellyfinUsername: account.User.Name,
+      jellyfinUserId: account.User.Id,
+      permissions: settings.main.defaultPermissions,
+      userType: UserType.JELLYFIN,
+      avatar: gravatarUrl(email, { default: 'mm', size: 200 }),
+    });
+    await userRepository.save(user);
+  }
+
+  return user;
+}
+
 authRoutes.post('/jellyfin', async (req, res, next) => {
   const settings = getSettings();
   const userRepository = getRepository(User);
@@ -383,42 +428,8 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
     );
 
     if (secondary) {
-      if (
-        !account.User?.Id ||
-        account.User.ServerId !== serverId ||
-        serverId !== settings.jellyfin.serverId ||
-        settings.main.mediaServerType !== MediaServerType.PLEX ||
-        !settings.secondaryLoginAvailable ||
-        !(await userRepository.existsBy({ id: 1 }))
-      ) {
-        return next({ status: 403, message: 'Access denied.' });
-      }
-
-      user = await userRepository.findOneBy({
-        jellyfinUserId: account.User.Id,
-        userType: UserType.JELLYFIN,
-      });
-
-      if (!user) {
-        const email = account.User.Name;
-        if (
-          !settings.main.newPlexLogin ||
-          (await userRepository.existsBy({ email }))
-        ) {
-          return next({ status: 403, message: 'Access denied.' });
-        }
-
-        user = new User({
-          email,
-          jellyfinUsername: account.User.Name,
-          jellyfinUserId: account.User.Id,
-          permissions: settings.main.defaultPermissions,
-          userType: UserType.JELLYFIN,
-          avatar: gravatarUrl(email, { default: 'mm', size: 200 }),
-        });
-        await userRepository.save(user);
-      }
-
+      const user = await secondaryJellyfinUser(account, serverId);
+      if (!user) return next({ status: 403, message: 'Access denied.' });
       if (req.session) {
         req.session.userId = user.id;
       }
@@ -722,10 +733,17 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
   }
 });
 
-authRoutes.post('/jellyfin/quickconnect/initiate', async (req, res, next) => {
+function quickConnectAvailable() {
   const settings = getSettings();
+  return (
+    settings.main.mediaServerType === MediaServerType.JELLYFIN ||
+    (settings.main.mediaServerType === MediaServerType.PLEX &&
+      settings.secondaryLoginAvailable)
+  );
+}
 
-  if (settings.main.mediaServerType !== MediaServerType.JELLYFIN) {
+authRoutes.post('/jellyfin/quickconnect/initiate', async (req, res, next) => {
+  if (!quickConnectAvailable()) {
     return next({
       status: 403,
       message: 'Quick Connect is only supported by Jellyfin.',
@@ -759,9 +777,7 @@ authRoutes.post('/jellyfin/quickconnect/initiate', async (req, res, next) => {
 });
 
 authRoutes.get('/jellyfin/quickconnect/check', async (req, res, next) => {
-  const settings = getSettings();
-
-  if (settings.main.mediaServerType !== MediaServerType.JELLYFIN) {
+  if (!quickConnectAvailable()) {
     return next({
       status: 403,
       message: 'Quick Connect is only supported by Jellyfin.',
@@ -822,7 +838,7 @@ authRoutes.post(
       });
     }
 
-    if (settings.main.mediaServerType !== MediaServerType.JELLYFIN) {
+    if (!quickConnectAvailable() || !settings.main.mediaServerLogin) {
       return next({
         status: 403,
         message: 'Quick Connect is only supported by Jellyfin.',
@@ -837,7 +853,15 @@ authRoutes.post(
         undefined
       );
 
+      const secondary = settings.main.mediaServerType === MediaServerType.PLEX;
+      const serverId = settings.jellyfin.serverId;
       const account = await jellyfinServer.authenticateQuickConnect(secret);
+      if (secondary) {
+        const user = await secondaryJellyfinUser(account, serverId);
+        if (!user) return next({ status: 403, message: 'Access denied.' });
+        if (req.session) req.session.userId = user.id;
+        return res.status(200).json(user.filter());
+      }
 
       let user = await userRepository.findOne({
         where: { jellyfinUserId: account.User.Id },

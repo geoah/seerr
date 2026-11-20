@@ -50,7 +50,9 @@ const JellyfinLogin = ({
   const toasts = useToasts();
   const intl = useIntl();
   const settings = useSettings();
-  const [showQuickConnect, setShowQuickConnect] = useState(false);
+  const [showQuickConnect, setShowQuickConnect] = useState(
+    serverType === MediaServerType.JELLYFIN
+  );
 
   const mediaServerFormatValues = {
     mediaServerName:
@@ -82,6 +84,20 @@ const JellyfinLogin = ({
     : settings.currentSettings.jellyfinHost;
   const jellyfinForgotPasswordUrl =
     settings.currentSettings.jellyfinForgotPasswordUrl;
+
+  if (showQuickConnect) {
+    return (
+      <JellyfinQuickConnectModal
+        onClose={() => setShowQuickConnect(false)}
+        onAuthenticated={() => {
+          setShowQuickConnect(false);
+          revalidate();
+        }}
+        onError={handleQuickConnectError}
+        mediaServerName={mediaServerFormatValues.mediaServerName}
+      />
+    );
+  }
 
   return (
     <div>
@@ -223,7 +239,7 @@ const JellyfinLogin = ({
         }}
       </Formik>
 
-      {!secondary && serverType === MediaServerType.JELLYFIN && (
+      {serverType === MediaServerType.JELLYFIN && (
         <div className="mt-4">
           <Button
             buttonType="ghost"
@@ -235,18 +251,6 @@ const JellyfinLogin = ({
             <span>{intl.formatMessage(messages.quickconnect)}</span>
           </Button>
         </div>
-      )}
-
-      {showQuickConnect && (
-        <JellyfinQuickConnectModal
-          onClose={() => setShowQuickConnect(false)}
-          onAuthenticated={() => {
-            setShowQuickConnect(false);
-            revalidate();
-          }}
-          onError={handleQuickConnectError}
-          mediaServerName={mediaServerFormatValues.mediaServerName}
-        />
       )}
     </div>
   );
